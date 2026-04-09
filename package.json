@@ -1,0 +1,30 @@
+{
+  "name": "antipodes",
+  "version": "1.0.0",
+  "description": "An spherical trigonometry experiment where a ball in the center of the sphere is the core of the game, you dig to find it and take it to the antipodes! (If they let you >.<)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dtellz/antipodes.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/dtellz/antipodes/issues"
+  },
+  "homepage": "https://github.com/dtellz/antipodes#readme",
+  "dependencies": {
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.160.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.1.4"
+  }
+}
