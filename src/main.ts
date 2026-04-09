@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { generateGeodesicSphere } from './core/geodesic';
+import { RadialGeodesicEngine } from './core/engine';
 
 function init() {
   // Scene setup
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.z = 3;
+  camera.position.set(3, 3, 3);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -24,43 +24,58 @@ function init() {
   pointLight.position.set(5, 5, 5);
   scene.add(pointLight);
 
-  // Generate Geodesic Sphere (Subdivisions: 3, Radius: 1)
-  const subdivisions = 3;
-  const radius = 1;
-  const geodesicMesh = generateGeodesicSphere(subdivisions, radius);
+  // Initialize Engine (Subdivisions: 3, Shell Radius Step: 1)
+  const engine = new RadialGeodesicEngine(3, 1);
 
-  // Create Geometry
-  const geometry = new THREE.BufferGeometry();
-  
-  // Convert Vector3 array to Float32Array for BufferGeometry
-  const positions = new Float32Array(geodesicMesh.vertices.length * 3);
-  for (let i = 0; i < geodesicMesh.vertices.length; i++) {
-    positions[i * 3] = geodesicMesh.vertices[i].x;
-    positions[i * 3 + 1] = geodesicMesh.vertices[i].y;
-    positions[i * 3 + 2] = geodesicMesh.vertices[i].z;
+  // Visualize a few voxels to test Phase 2
+  const voxelCountToTest = 50;
+  const triangleCount = engine.getTriangleCount();
+
+  for (let i = 0; i < voxelCountToTest; i++) {
+    const r = Math.floor(Math.random() * 3); // Shells 0, 1, or 2
+    const cellID = Math.floor(Math.random() * triangleCount);
+
+    const { vertices, indices } = engine.getVoxelGeometry(r, cellID);
+
+    const geometry = new THREE.BufferGeometry();
+    const posArray = new Float32Array(vertices.length * 3);
+    for (let j = 0; j < vertices.length; j++) {
+      posArray[j * 3] = vertices[j].x;
+      posArray[j * 3 + 1] = vertices[j].y;
+      posArray[j * 3 + 2] = vertices[j].z;
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshPhongMaterial({
+      color: Math.random() * 0xffffff,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.8
+    });
+
+    const voxelMesh = new THREE.Mesh(geometry, material);
+    scene.add(voxelMesh);
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setIndex(new THREE.BufferAttribute(geodesicMesh.indices, 1));
-  geometry.computeVertexNormals();
+  // Add the base geodesic sphere for reference (wireframe)
+  const baseGeom = engine.getBaseMesh();
+  const baseGeometry = new THREE.BufferGeometry();
+  const basePosArray = new Float32Array(baseGeom.vertices.length * 3); // Wait, baseGeom is GeodesicMesh interface
+  // Correcting for the interface:
+  const basePositions = new Float32Array(baseGeom.vertices.length * 3);
+  for (let i = 0; i < baseGeom.vertices.length; i++) {
+    basePositions[i * 3] = baseGeom.vertices[i].x;
+    basePositions[i * 3 + 1] = baseGeom.vertices[i].y;
+    basePositions[i * 3 + 2] = baseGeom.vertices[i].z;
+  }
+  baseGeometry.setAttribute('position', new THREE.BufferAttribute(basePositions, 3));
+  baseGeometry.setIndex(new THREE.BufferAttribute(baseGeom.indices, 1));
 
-  // Material
-  const material = new THREE.MeshPhongMaterial({
-    color: 0x00ff88,
-    wireframe: true,
-    side: THREE.DoubleSide
-  });
-
-  const mesh = new THREE.Mesh(geometry, material);
-  scene.add(mesh);
-
-  // Add a solid version for better look
-  const solidMaterial = new THREE.MeshPhongMaterial({
-    color: 0x224466,
-    side: THREE.DoubleSide
-  });
-  const solidMesh = new THREE.Mesh(geometry, solidMaterial);
-  scene.add(solidMesh);
+  const baseMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.2 });
+  const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
+  scene.add(baseMesh);
 
   // Resize handler
   window.addEventListener('resize', () => {
