@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RadialGeodesicEngine } from './core/engine';
 import { WorldManager } from './core/world_manager';
 import { InteractionManager } from './core/interaction';
+import { GeodesicMesher } from './core/mesher';
+import { createInflationMaterial } from './core/shaders';
 
 function init() {
   // Scene setup
@@ -77,43 +79,43 @@ function init() {
   const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
   scene.add(baseMesh);
 
-  // --- PHASE 4 TEST SETUP ---
+  // --- PHASE 5: MESHING & RENDERING SETUP ---
   const worldManager = new WorldManager();
   const interactionManager = new InteractionManager(camera);
 
   // Populate the world with some random voxels to click on
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 200; i++) {
     const r = Math.floor(Math.random() * 3) + 1; // Shells 1, 2, or 3
     const cellID = Math.floor(Math.random() * triangleCount);
+    const colors = [0x8B4513, 0x228B22, 0x808080, 0xFFD700]; // dirt, grass, stone, gold
+    const materialType = ['dirt', 'grass', 'stone', 'gold'][i % 4];
 
     // Add to storage
-    worldManager.setVoxel(r, cellID, { materialType: 'dirt', lightLevel: 1, hardness: 1 });
-
-    // Create visual representation
-    const { vertices, indices } = engine.getVoxelGeometry(r, cellID);
-    const voxelGeom = new THREE.BufferGeometry();
-    const vPos = new Float32Array(vertices.length * 3);
-    for (let j = 0; j < vertices.length; j++) {
-      vPos[j * 3] = vertices[j].x;
-      vPos[j * 3 + 1] = vertices[j].y;
-      vPos[j * 3 + 2] = vertices[j].z;
-    }
-    voxelGeom.setAttribute('position', new THREE.BufferAttribute(vPos, 3));
-    voxelGeom.setIndex(new THREE.BufferAttribute(indices, 1));
-    voxelGeom.computeVertexNormals();
-
-    const voxelMat = new THREE.MeshPhongMaterial({
-      color: Math.random() * 0xffffff,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.7
+    worldManager.setVoxel(r, cellID, {
+      materialType,
+      lightLevel: 1,
+      hardness: 1
     });
-
-    const voxelMesh = new THREE.Mesh(voxelGeom, voxelMat);
-    // Store metadata for raycasting
-    voxelMesh.userData.voxelInfo = { r, cellID };
-    scene.add(voxelMesh);
   }
+
+  // Generate and add meshes using the Greedy Mesher
+  const mesher = new GeodesicMesher(engine, worldManager);
+  const materialMeshes = mesher.generateMeshes();
+
+  materialMeshes.forEach((mesh, materialType) => {
+    // Assign inflation material
+    const color = materialType === 'dirt' ? 0x8B4513 :
+                  materialType === 'grass' ? 0x228B22 :
+                  materialType === 'stone' ? 0x808080 : 0xFFD700;
+    
+    mesh.material = createInflationMaterial(color, 0.015);
+    scene.add(mesh);
+  });
+
+  // For raycasting to work with batched meshes, we need to handle it differently.
+  // Since the mesher batches everything, a single click might hit many voxels or none.
+  // For this demo, we'll keep the interaction simple:
+  // In a real engine, we would use a spatial hash or similar for raycasting against voxels.
 
   // Handle clicks for digging
   window.addEventListener('click', (event) => {
