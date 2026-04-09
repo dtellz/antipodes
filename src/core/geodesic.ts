@@ -3,6 +3,16 @@ import * as THREE from 'three';
 export interface GeodesicMesh {
   vertices: THREE.Vector3[];
   indices: Uint32Array;
+  hierarchy?: GeodesicHierarchy;
+}
+
+export interface GeodesicHierarchy {
+  /**
+   * Maps a parent triangle index at level k to its children indices at level k+1.
+   * levels[k][parentIndex] = [childIndex1, childIndex2, childIndex3, childIndex4]
+   */
+  levels: Map<number, Map<number, number[]>>;
+  maxLevel: number;
 }
 
 /**
@@ -57,14 +67,20 @@ export function generateIcosahedron(): GeodesicMesh {
   };
 }
 
+interface SubdivisionResult {
+  mesh: GeodesicMesh;
+  parentToChildren: Map<number, number[]>;
+}
+
 /**
  * Performs one level of linear subdivision on the mesh.
  * Splits each triangle into four smaller triangles by finding midpoints of edges.
  */
-export function subdivide(mesh: GeodesicMesh): GeodesicMesh {
+export function subdivide(mesh: GeodesicMesh): SubdivisionResult {
   const { vertices, indices } = mesh;
   const newVertices = [...vertices];
   const newIndices: number[] = [];
+  const parentToChildren = new Map<number, number[]>();
   
   // Map to store midpoints to avoid duplicates: "v1-v2" -> index
   const midpointCache = new Map<string, number>();
@@ -86,6 +102,7 @@ export function subdivide(mesh: GeodesicMesh): GeodesicMesh {
   }
 
   for (let i = 0; i < indices.length; i += 3) {
+    const parentIndex = i / 3;
     const v1 = indices[i];
     const v2 = indices[i + 1];
     const v3 = indices[i + 2];
@@ -95,15 +112,29 @@ export function subdivide(mesh: GeodesicMesh): GeodesicMesh {
     const c = getMidpoint(v3, v1);
 
     // Four new triangles
-    newIndices.push(v1, a, c);
-    newIndices.push(v2, b, a);
-    newIndices.push(v3, c, b);
-    newIndices.push(a, b, c);
+    const childIndices = [
+      [v1, a, c],
+      [v2, b, a],
+      [v3, c, b],
+      [a, b, c]
+    ];
+
+    const children: number[] = [];
+    for (const tri of childIndices) {
+      const startIdx = newIndices.length;
+      newIndices.push(tri[0], tri[1], tri[2]);
+      children.push(startIdx / 3);
+    }
+
+    parentToChildren.set(parentIndex, children);
   }
 
   return {
-    vertices: newVertices,
-    indices: new Uint32Array(newIndices),
+    mesh: {
+      vertices: newVertices,
+      indices: new Uint32Array(newIndices),
+    },
+    parentToChildren
   };
 }
 
@@ -122,12 +153,29 @@ export function normalize(mesh: GeodesicMesh, radius: number): GeodesicMesh {
  * Generates a geodesic sphere by subdividing an icosahedron N times.
  */
 export function generateGeodesicSphere(subdivisions: number, radius: number = 1): GeodesicMesh {
-  let mesh = generateIcosahedron();
+  let currentMesh = generateIcosahedron();
+  const hierarchyLevels: Map<number, number[]>[] = [];
 
   for (let i = 0; i < subdivisions; i++) {
-    mesh = subdivide(mesh);
-    mesh = normalize(mesh, radius);
+    const result = subdivide(currentMesh);
+    hierarchyLevels.push(result.parentToChildren);
+    currentMesh = normalize(result.mesh, radius);
   }
 
-  return mesh;
+  if (subdivisions > 0) {
+    const levelsMap = new Map<number, Map<number, number[]>>();
+    for (let i = 0; i < hierarchyLevels.length; i++) {
+      const levelMap = new Map<number, number[]>();
+      hierarchyLevels[i].forEach((children, parentIndex) => {
+        levelMap.set(parentIndex, children);
+      });
+      levelsMap.set(i, levelMap);
+    }
+    currentMesh.hierarchy = {
+      levels: levelsMap,
+      maxLevel: subdivisions - 1
+    };
+  }
+
+  return currentMesh;
 }
