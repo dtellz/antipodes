@@ -1,14 +1,19 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { generateGeodesicSphere } from './core/geodesic';
-import { TerrainGenerator } from './core/terrain';
+import { VoxelWorld } from './core/voxel_world';
+import { WorldRenderer } from './core/world_renderer';
+import { Player } from './core/player';
+import { DiggingSystem } from './core/digging';
+
+// Game modes
+type GameMode = 'orbit' | 'player';
 
 function init() {
   // Scene setup
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x87CEEB); // Sky blue background
+  scene.background = new THREE.Color(0x87CEEB);
   
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 100);
+  const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
   camera.position.set(2.5, 1.5, 2.5);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -16,108 +21,53 @@ function init() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   document.body.appendChild(renderer.domElement);
 
-  // Controls
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.05;
-  controls.minDistance = 1.2;
-  controls.maxDistance = 10;
+  // Orbit controls (for spectator mode)
+  const orbitControls = new OrbitControls(camera, renderer.domElement);
+  orbitControls.enableDamping = true;
+  orbitControls.dampingFactor = 0.05;
+  orbitControls.minDistance = 1.2;
+  orbitControls.maxDistance = 10;
 
   // Lighting
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
   scene.add(ambientLight);
 
-  const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
   sunLight.position.set(5, 3, 4);
   scene.add(sunLight);
 
-  // Hemisphere light for better ambient
-  const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x3d5c3d, 0.4);
+  const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x3d5c3d, 0.3);
   scene.add(hemiLight);
 
-  // --- PLANET GENERATION ---
-  const SUBDIVISION_LEVEL = 6; // 20 * 4^6 = 81,920 triangles
+  // --- VOXEL WORLD ---
+  const SUBDIVISION_LEVEL = 4; // Lower for performance with voxels (5120 cells per shell)
+  const NUM_SHELLS = 15;
   const BASE_RADIUS = 1.0;
   
-  console.log(`Generating geodesic sphere with ${20 * Math.pow(4, SUBDIVISION_LEVEL)} triangles...`);
+  console.log('Creating voxel world...');
+  const world = new VoxelWorld(SUBDIVISION_LEVEL, NUM_SHELLS, BASE_RADIUS, 0.06);
+  world.generateTerrain();
   
-  const geodesicMesh = generateGeodesicSphere(SUBDIVISION_LEVEL, BASE_RADIUS);
-  const terrain = new TerrainGenerator(42);
+  // World renderer
+  const worldRenderer = new WorldRenderer(world, scene);
+  worldRenderer.update();
   
-  console.log(`Vertices: ${geodesicMesh.vertices.length}, Triangles: ${geodesicMesh.indices.length / 3}`);
-
-  // Create the planet geometry with terrain
-  const geometry = new THREE.BufferGeometry();
-  
-  // Apply terrain heights to vertices
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const normals: number[] = [];
-  
-  // Process each triangle
-  const numTriangles = geodesicMesh.indices.length / 3;
-  
-  for (let i = 0; i < numTriangles; i++) {
-    const i1 = geodesicMesh.indices[i * 3];
-    const i2 = geodesicMesh.indices[i * 3 + 1];
-    const i3 = geodesicMesh.indices[i * 3 + 2];
-    
-    const v1 = geodesicMesh.vertices[i1].clone();
-    const v2 = geodesicMesh.vertices[i2].clone();
-    const v3 = geodesicMesh.vertices[i3].clone();
-    
-    // Get terrain data for each vertex
-    const t1 = terrain.getTerrainAt(v1);
-    const t2 = terrain.getTerrainAt(v2);
-    const t3 = terrain.getTerrainAt(v3);
-    
-    // Apply height displacement
-    const r1 = terrain.getRadiusAt(v1, BASE_RADIUS);
-    const r2 = terrain.getRadiusAt(v2, BASE_RADIUS);
-    const r3 = terrain.getRadiusAt(v3, BASE_RADIUS);
-    
-    v1.normalize().multiplyScalar(r1);
-    v2.normalize().multiplyScalar(r2);
-    v3.normalize().multiplyScalar(r3);
-    
-    // Add positions
-    positions.push(v1.x, v1.y, v1.z);
-    positions.push(v2.x, v2.y, v2.z);
-    positions.push(v3.x, v3.y, v3.z);
-    
-    // Add colors (per-vertex)
-    colors.push(t1.color.r, t1.color.g, t1.color.b);
-    colors.push(t2.color.r, t2.color.g, t2.color.b);
-    colors.push(t3.color.r, t3.color.g, t3.color.b);
-    
-    // Calculate face normal
-    const edge1 = new THREE.Vector3().subVectors(v2, v1);
-    const edge2 = new THREE.Vector3().subVectors(v3, v1);
-    const normal = new THREE.Vector3().crossVectors(edge1, edge2).normalize();
-    
-    normals.push(normal.x, normal.y, normal.z);
-    normals.push(normal.x, normal.y, normal.z);
-    normals.push(normal.x, normal.y, normal.z);
-  }
-  
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  
-  // Create material with vertex colors
-  const material = new THREE.MeshLambertMaterial({
-    vertexColors: true,
-    side: THREE.FrontSide,
+  // --- CORE ORB (The prize at the center!) ---
+  const coreGeometry = new THREE.SphereGeometry(0.08, 32, 32);
+  const coreMaterial = new THREE.MeshStandardMaterial({
+    color: 0xFFD700,
+    emissive: 0xFFAA00,
+    emissiveIntensity: 0.5,
+    metalness: 0.8,
+    roughness: 0.2,
   });
+  const coreOrb = new THREE.Mesh(coreGeometry, coreMaterial);
+  coreOrb.position.set(0, 0, 0);
+  scene.add(coreOrb);
   
-  const planet = new THREE.Mesh(geometry, material);
-  scene.add(planet);
-  
-  console.log('Planet created successfully!');
-
-  // Add atmosphere glow effect
-  const atmosphereGeometry = new THREE.SphereGeometry(BASE_RADIUS * 1.02, 64, 64);
-  const atmosphereMaterial = new THREE.ShaderMaterial({
+  // Core glow
+  const coreGlowGeometry = new THREE.SphereGeometry(0.12, 32, 32);
+  const coreGlowMaterial = new THREE.ShaderMaterial({
     vertexShader: `
       varying vec3 vNormal;
       void main() {
@@ -128,16 +78,61 @@ function init() {
     fragmentShader: `
       varying vec3 vNormal;
       void main() {
-        float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
-        gl_FragColor = vec4(0.3, 0.6, 1.0, 1.0) * intensity * 0.5;
+        float intensity = pow(0.6 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+        gl_FragColor = vec4(1.0, 0.8, 0.2, 1.0) * intensity;
       }
     `,
     blending: THREE.AdditiveBlending,
     side: THREE.BackSide,
     transparent: true,
   });
-  const atmosphere = new THREE.Mesh(atmosphereGeometry, atmosphereMaterial);
-  scene.add(atmosphere);
+  const coreGlow = new THREE.Mesh(coreGlowGeometry, coreGlowMaterial);
+  scene.add(coreGlow);
+
+  // --- PLAYER ---
+  const startPos = new THREE.Vector3(0, BASE_RADIUS + 0.15, 0);
+  const player = new Player(startPos, camera);
+  
+  // --- DIGGING SYSTEM ---
+  const diggingSystem = new DiggingSystem(world, scene);
+  
+  // --- GAME STATE ---
+  let gameMode: GameMode = 'orbit';
+  let hasOrb = false;
+  let gameWon = false;
+  const startDirection = startPos.clone().normalize();
+  
+  // --- UI ---
+  const ui = createUI();
+  const perfMonitor = new PerfMonitor();
+  
+  // Mode switching
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      gameMode = gameMode === 'orbit' ? 'player' : 'orbit';
+      orbitControls.enabled = gameMode === 'orbit';
+      
+      if (gameMode === 'orbit') {
+        document.exitPointerLock();
+      }
+      
+      ui.modeText.textContent = gameMode === 'orbit' ? 'Spectator Mode (Tab to switch)' : 'Player Mode (Tab to switch)';
+    }
+  });
+  
+  // Digging on click
+  document.addEventListener('mousedown', (e) => {
+    if (gameMode === 'player' && e.button === 0) {
+      const lookDir = player.getLookDirection();
+      const result = diggingSystem.dig(player.getPosition(), lookDir);
+      
+      if (result) {
+        worldRenderer.markDirty();
+        console.log(`Dug voxel at shell ${result.shell}, cell ${result.cellID}`);
+      }
+    }
+  });
 
   // Resize handler
   window.addEventListener('resize', () => {
@@ -146,19 +141,202 @@ function init() {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // Animation loop
+  // --- GAME LOOP ---
+  let lastTime = performance.now();
+  
   function animate() {
     requestAnimationFrame(animate);
     
-    // Slow rotation
-    planet.rotation.y += 0.001;
-    atmosphere.rotation.y += 0.001;
+    const now = performance.now();
+    const deltaTime = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
     
-    controls.update();
+    // Update based on mode
+    if (gameMode === 'player') {
+      player.update(
+        deltaTime, 
+        (pos) => world.getGroundHeight(pos),
+        (pos) => world.checkCollision(pos)
+      );
+    } else {
+      orbitControls.update();
+    }
+    
+    // Update digging debris
+    diggingSystem.update(deltaTime);
+    
+    // Update world mesh if needed
+    worldRenderer.update();
+    
+    // Animate core orb
+    coreOrb.rotation.y += deltaTime * 0.5;
+    coreGlow.rotation.y -= deltaTime * 0.3;
+    
+    // Check if player reached the core
+    if (!hasOrb && player.getPosition().length() < 0.15) {
+      hasOrb = true;
+      scene.remove(coreOrb);
+      scene.remove(coreGlow);
+      ui.statusText.textContent = '🌟 You got the orb! Now bring it to the other side!';
+      ui.statusText.style.color = '#FFD700';
+    }
+    
+    // Check win condition (reached antipode with orb)
+    if (hasOrb && !gameWon) {
+      const currentDir = player.getPosition().clone().normalize();
+      const dotProduct = currentDir.dot(startDirection);
+      
+      if (dotProduct < -0.9 && player.getPosition().length() > BASE_RADIUS * 0.9) {
+        gameWon = true;
+        ui.statusText.textContent = '🎉 YOU WIN! You brought the orb to the antipode!';
+        ui.statusText.style.color = '#00FF00';
+        ui.statusText.style.fontSize = '24px';
+      }
+    }
+    
+    // Update UI
+    const dist = player.getPosition().length();
+    ui.depthText.textContent = `Depth: ${((BASE_RADIUS - dist) * 100).toFixed(1)}% to center`;
+    
+    // Update perf monitor
+    const voxelCount = world.getAllVoxels().size;
+    const triCount = renderer.info.render.triangles;
+    perfMonitor.update(voxelCount, triCount);
+    
     renderer.render(scene, camera);
   }
 
   animate();
+}
+
+class PerfMonitor {
+  private container: HTMLElement;
+  private fpsText: HTMLElement;
+  private voxelText: HTMLElement;
+  private frameText: HTMLElement;
+  
+  private frames: number[] = [];
+  private lastUpdate: number = 0;
+  
+  constructor() {
+    this.container = document.createElement('div');
+    this.container.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: #0f0;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 8px 12px;
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 1000;
+    `;
+    
+    this.fpsText = document.createElement('div');
+    this.voxelText = document.createElement('div');
+    this.frameText = document.createElement('div');
+    
+    this.container.appendChild(this.fpsText);
+    this.container.appendChild(this.voxelText);
+    this.container.appendChild(this.frameText);
+    document.body.appendChild(this.container);
+  }
+  
+  update(voxelCount: number, triangleCount: number): void {
+    const now = performance.now();
+    this.frames.push(now);
+    
+    // Keep only last second of frames
+    while (this.frames.length > 0 && this.frames[0] < now - 1000) {
+      this.frames.shift();
+    }
+    
+    // Update display every 100ms
+    if (now - this.lastUpdate > 100) {
+      const fps = this.frames.length;
+      const fpsColor = fps >= 50 ? '#0f0' : fps >= 30 ? '#ff0' : '#f00';
+      
+      this.fpsText.innerHTML = `FPS: <span style="color:${fpsColor}">${fps}</span>`;
+      this.voxelText.textContent = `Voxels: ${voxelCount.toLocaleString()}`;
+      this.frameText.textContent = `Tris: ${triangleCount.toLocaleString()}`;
+      
+      this.lastUpdate = now;
+    }
+  }
+}
+
+function createUI(): { modeText: HTMLElement; statusText: HTMLElement; depthText: HTMLElement } {
+  const container = document.createElement('div');
+  container.style.cssText = `
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    color: white;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    text-shadow: 1px 1px 2px black;
+    pointer-events: none;
+    z-index: 1000;
+  `;
+  
+  const modeText = document.createElement('div');
+  modeText.textContent = 'Spectator Mode (Tab to switch)';
+  modeText.style.marginBottom = '5px';
+  
+  const depthText = document.createElement('div');
+  depthText.textContent = 'Depth: 0%';
+  depthText.style.marginBottom = '5px';
+  
+  const statusText = document.createElement('div');
+  statusText.textContent = 'Dig to the center and find the golden orb!';
+  statusText.style.color = '#88CCFF';
+  
+  const controls = document.createElement('div');
+  controls.innerHTML = `
+    <br>
+    <strong>Controls:</strong><br>
+    WASD - Move<br>
+    Mouse - Look<br>
+    Click - Dig<br>
+    Space - Jump<br>
+    Tab - Toggle mode
+  `;
+  controls.style.marginTop = '20px';
+  controls.style.fontSize = '12px';
+  controls.style.opacity = '0.8';
+  
+  container.appendChild(modeText);
+  container.appendChild(depthText);
+  container.appendChild(statusText);
+  container.appendChild(controls);
+  document.body.appendChild(container);
+  
+  // Crosshair
+  const crosshair = document.createElement('div');
+  crosshair.style.cssText = `
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 20px;
+    height: 20px;
+    pointer-events: none;
+    z-index: 1000;
+  `;
+  crosshair.innerHTML = `
+    <svg width="20" height="20" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r="2" fill="none" stroke="white" stroke-width="1"/>
+      <line x1="10" y1="0" x2="10" y2="6" stroke="white" stroke-width="1"/>
+      <line x1="10" y1="14" x2="10" y2="20" stroke="white" stroke-width="1"/>
+      <line x1="0" y1="10" x2="6" y2="10" stroke="white" stroke-width="1"/>
+      <line x1="14" y1="10" x2="20" y2="10" stroke="white" stroke-width="1"/>
+    </svg>
+  `;
+  document.body.appendChild(crosshair);
+  
+  return { modeText, statusText, depthText };
 }
 
 init();
