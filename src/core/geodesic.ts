@@ -1,0 +1,133 @@
+import * as THREE from 'three';
+
+export interface GeodesicMesh {
+  vertices: THREE.Vector3[];
+  indices: Uint32Array;
+}
+
+/**
+ * Generates the 12 vertices and 20 faces of a regular Icosahedron.
+ */
+export function generateIcosahedron(): GeodesicMesh {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const vertices: THREE.Vector3[] = [
+    new THREE.Vector3(-1,  phi,  0),
+    new THREE.Vector3( 1,  phi,  0),
+    new THREE.Vector3(-1, -phi,  0),
+    new THREE.Vector3( 1, -phi,  0),
+    new THREE.Vector3( 0, -1,  phi),
+    new THREE.Vector3( 0,  1,  phi),
+    new THREE.Vector3( 0, -1, -phi),
+    new THREE.Vector3( 0,  1, -phi),
+    new THREE.Vector3( phi,  0, -1),
+    new THREE.Vector3( phi,  0,  1),
+    new THREE.Vector3(-phi,  0, -1),
+    new THREE.Vector3(-phi,  0,  1),
+  ];
+
+  // Normalize vertices to unit sphere initially
+  vertices.forEach(v => v.normalize());
+
+  const indices: number[] = [
+    0, 11, 5,
+    0, 5, 1,
+    0, 1, 7,
+    0, 7, 10,
+    0, 10, 11,
+    1, 5, 9,
+    5, 11, 4,
+    11, 10, 2,
+    10, 7, 6,
+    7, 1, 8,
+    3, 9, 4,
+    3, 4, 2,
+    3, 2, 6,
+    3, 6, 8,
+    3, 8, 9,
+    4, 9, 5,
+    2, 4, 11,
+    6, 2, 10,
+    8, 6, 7,
+    9, 8, 1,
+  ];
+
+  return {
+    vertices,
+    indices: new Uint32Array(indices),
+  };
+}
+
+/**
+ * Performs one level of linear subdivision on the mesh.
+ * Splits each triangle into four smaller triangles by finding midpoints of edges.
+ */
+export function subdivide(mesh: GeodesicMesh): GeodesicMesh {
+  const { vertices, indices } = mesh;
+  const newVertices = [...vertices];
+  const newIndices: number[] = [];
+  
+  // Map to store midpoints to avoid duplicates: "v1-v2" -> index
+  const midpointCache = new Map<string, number>();
+
+  function getMidpoint(idx1: number, idx2: number): number {
+    const key = idx1 < idx2 ? `${idx1}-${idx2}` : `${idx2}-${idx1}`;
+    if (midpointCache.has(key)) {
+      return midpointCache.get(key)!;
+    }
+
+    const v1 = vertices[idx1];
+    const v2 = vertices[idx2];
+    const midpoint = new THREE.Vector3().addVectors(v1, v2).multiplyScalar(0.5);
+    
+    newVertices.push(midpoint);
+    const newIdx = newVertices.length - 1;
+    midpointCache.set(key, newIdx);
+    return newIdx;
+  }
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const v1 = indices[i];
+    const v2 = indices[i + 1];
+    const v3 = indices[i + 2];
+
+    const a = getMidpoint(v1, v2);
+    const b = getMidpoint(v2, v3);
+    const c = getMidpoint(v3, v1);
+
+    // Four new triangles
+    newIndices.push(v1, a, c);
+    newIndices.push(v2, b, a);
+    newIndices.push(v3, c, b);
+    newIndices.push(a, b, c);
+  }
+
+  return {
+    vertices: newVertices,
+    indices: new Uint32Array(newIndices),
+  };
+}
+
+/**
+ * Pushes all vertices to a specified radius R.
+ */
+export function normalize(mesh: GeodesicMesh, radius: number): GeodesicMesh {
+  const newVertices = mesh.vertices.map(v => v.clone().normalize().multiplyScalar(radius));
+  return {
+    ...mesh,
+    vertices: newVertices,
+  };
+}
+
+/**
+ * Generates a geodesic sphere by subdividing an icosahedron N times.
+ */
+export function generateGeodesicSphere(subdivisions: number, radius: number = 1): GeodesicMesh {
+  let mesh = generateIcosahedron();
+
+  for (let i = 0; i < subdivisions; i++) {
+    mesh = subdivide(mesh);
+    mesh = normalize(mesh, radius);
+  }
+
+  return mesh;
+}
