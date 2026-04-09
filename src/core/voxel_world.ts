@@ -24,6 +24,8 @@ export class VoxelWorld {
   public readonly baseRadius: number;
   public readonly triangleCount: number;
 
+  public readonly coreRadius: number;
+
   constructor(
     subdivisionLevel: number = 5,
     numShells: number = 10,
@@ -34,6 +36,7 @@ export class VoxelWorld {
     this.numShells = numShells;
     this.baseRadius = baseRadius;
     this.shellThickness = shellThickness;
+    this.coreRadius = 0.15; // Hollow core where the orb sits
     
     this.geodesicMesh = generateGeodesicSphere(subdivisionLevel, 1.0);
     this.triangleCount = this.geodesicMesh.indices.length / 3;
@@ -98,11 +101,11 @@ export class VoxelWorld {
 
   /**
    * Get the radius of a specific shell.
+   * Shell 0 starts at coreRadius, shell numShells-1 is at surface.
    */
   public getShellRadius(shell: number): number {
-    // Shell 0 is at center, shell numShells-1 is at surface
-    const coreRadius = this.baseRadius * 0.1; // Small core
-    return coreRadius + (shell / (this.numShells - 1)) * (this.baseRadius - coreRadius);
+    // Shells go from coreRadius to baseRadius
+    return this.coreRadius + (shell / (this.numShells - 1)) * (this.baseRadius - this.coreRadius);
   }
 
   /**
@@ -153,9 +156,15 @@ export class VoxelWorld {
 
   /**
    * Find which cell a world position is in.
+   * Returns null if inside the hollow core or outside all shells.
    */
   public worldToCell(position: THREE.Vector3): { shell: number; cellID: number } | null {
     const dist = position.length();
+    
+    // Inside hollow core - no voxels here
+    if (dist < this.coreRadius) {
+      return null;
+    }
     
     // Find shell
     let shell = -1;
@@ -172,20 +181,9 @@ export class VoxelWorld {
     if (shell < 0) return null;
     
     // Find cell by checking which triangle the direction falls into
-    const dir = position.clone().normalize();
-    let closestCell = 0;
-    let closestDist = Infinity;
+    const cellID = this.findClosestCell(position);
     
-    for (let cellID = 0; cellID < this.triangleCount; cellID++) {
-      const center = this.getCellCenter(shell, cellID).normalize();
-      const d = dir.distanceToSquared(center);
-      if (d < closestDist) {
-        closestDist = d;
-        closestCell = cellID;
-      }
-    }
-    
-    return { shell, cellID: closestCell };
+    return { shell, cellID };
   }
 
   /**
@@ -211,24 +209,62 @@ export class VoxelWorld {
 
   /**
    * Get ground height at a position (for player collision).
-   * Returns the top of the highest voxel in this direction.
+   * This finds the surface the player should stand on based on their current radius.
+   * 
+   * Key insight: "ground" depends on which direction you're coming from:
+   * - If outside a voxel shell, ground is the TOP of voxels below you
+   * - If inside the core cavity, there's no ground (return 0)
    */
   public getGroundHeight(position: THREE.Vector3): number {
+    const dist = position.length();
+    
+    // Inside the hollow core - no ground, free floating
+    if (dist < this.coreRadius) {
+      return 0;
+    }
+    
     const cellID = this.findClosestCell(position);
     
-    // Find the highest shell with a voxel in this cell column
-    for (let shell = this.numShells - 1; shell >= 0; shell--) {
+    // Find which shell the player is currently in or above
+    let currentShell = -1;
+    for (let s = 0; s < this.numShells; s++) {
+      const shellR = this.getShellRadius(s);
+      const nextR = s < this.numShells - 1 ? this.getShellRadius(s + 1) : shellR + this.shellThickness;
+      if (dist >= shellR && dist < nextR) {
+        currentShell = s;
+        break;
+      }
+    }
+    
+    // If above all shells (on surface), find highest voxel
+    if (currentShell < 0 && dist >= this.getShellRadius(this.numShells - 1)) {
+      for (let shell = this.numShells - 1; shell >= 0; shell--) {
+        if (this.hasVoxel(shell, cellID)) {
+          const outerR = shell < this.numShells - 1 
+            ? this.getShellRadius(shell + 1) 
+            : this.getShellRadius(shell) + this.shellThickness;
+          return outerR;
+        }
+      }
+      // No voxels at all in this column - fall to core
+      return 0;
+    }
+    
+    // Player is within the shell range - find the voxel surface below them
+    // Search downward from current position to find first voxel
+    for (let shell = currentShell; shell >= 0; shell--) {
       if (this.hasVoxel(shell, cellID)) {
-        // Return top of this voxel
-        const innerR = this.getShellRadius(shell);
+        // Found a voxel - ground is its top surface
         const outerR = shell < this.numShells - 1 
           ? this.getShellRadius(shell + 1) 
-          : innerR + this.shellThickness;
+          : this.getShellRadius(shell) + this.shellThickness;
         return outerR;
       }
     }
     
-    return 0.1; // Core radius
+    // No voxels below - player falls into the core cavity
+    // Return 0 to signal "no ground" (core cavity)
+    return 0;
   }
 
   /**

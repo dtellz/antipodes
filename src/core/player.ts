@@ -85,11 +85,18 @@ export class Player {
   }
 
   /**
-   * Update the local coordinate frame based on position (gravity toward center).
+   * Update the local coordinate frame based on position.
+   * "Up" is always away from the planet center (radial direction).
+   * This means gravity always pulls toward center regardless of which
+   * hemisphere the player is in.
    */
   private updateLocalFrame(): void {
-    // "Up" is always away from the planet center
-    this.localUp.copy(this.position).normalize();
+    // "Up" is always the radial direction (away from center)
+    // This naturally handles the antipode - when you cross the center,
+    // your "up" flips because your position vector flips
+    if (this.position.lengthSq() > 0.0001) {
+      this.localUp.copy(this.position).normalize();
+    }
     
     // Maintain forward direction tangent to sphere
     // Use world up as reference, but handle poles
@@ -158,55 +165,91 @@ export class Player {
     
     // Ground check
     const groundHeight = getGroundHeight(this.position);
-    const playerFeetHeight = groundHeight + this.config.height;
     const distFromCenter = this.position.length();
     
-    // Grounded if within small tolerance of ground
-    const groundTolerance = 0.005;
-    this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
+    // Special case: inside the core cavity (groundHeight == 0 means no ground)
+    const inCoreCavity = groundHeight === 0;
     
-    // Jump
-    if (this.keys.has('Space') && this.isGrounded) {
-      this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
+    if (inCoreCavity) {
+      // In the hollow core - always falling toward center, no ground to stand on
       this.isGrounded = false;
-    }
-    
-    // Apply gravity
-    if (!this.isGrounded) {
+      
+      // Apply gravity toward center
       const gravityDir = this.localUp.clone().negate();
       this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
       
-      // Calculate new position from velocity
+      // Apply velocity
       const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
-      const newPos = this.position.clone().add(velocityStep);
+      this.position.add(velocityStep);
       
-      // Check collision at new position
-      if (checkCollision && checkCollision(newPos)) {
-        // Hit a voxel - stop and stay at current position
-        this.velocity.set(0, 0, 0);
-        this.isGrounded = true;
-      } else {
-        // Check ground at new position
-        const newGroundHeight = getGroundHeight(newPos);
+      // Check if we've exited the core on the other side
+      const newGroundHeight = getGroundHeight(this.position);
+      if (newGroundHeight > 0) {
+        // Exited core - check for ground collision
         const newFeetHeight = newGroundHeight + this.config.height;
-        const newDist = newPos.length();
-        
-        if (newDist < newFeetHeight) {
-          // Would go below ground - snap to ground
+        if (this.position.length() < newFeetHeight) {
           this.position.normalize().multiplyScalar(newFeetHeight);
           this.velocity.set(0, 0, 0);
           this.isGrounded = true;
-        } else {
-          // Free fall
-          this.position.copy(newPos);
         }
       }
     } else {
-      // On ground - clear velocity
-      this.velocity.set(0, 0, 0);
+      // Normal ground physics
+      const playerFeetHeight = groundHeight + this.config.height;
       
-      // Snap to ground surface
-      this.position.normalize().multiplyScalar(playerFeetHeight);
+      // Grounded if within small tolerance of ground
+      const groundTolerance = 0.005;
+      this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
+      
+      // Jump
+      if (this.keys.has('Space') && this.isGrounded) {
+        this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
+        this.isGrounded = false;
+      }
+      
+      // Apply gravity
+      if (!this.isGrounded) {
+        const gravityDir = this.localUp.clone().negate();
+        this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
+        
+        // Calculate new position from velocity
+        const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
+        const newPos = this.position.clone().add(velocityStep);
+        
+        // Check collision at new position
+        if (checkCollision && checkCollision(newPos)) {
+          // Hit a voxel - stop and stay at current position
+          this.velocity.set(0, 0, 0);
+          this.isGrounded = true;
+        } else {
+          // Check ground at new position
+          const newGroundHeight = getGroundHeight(newPos);
+          
+          // If entering core cavity, just fall through
+          if (newGroundHeight === 0) {
+            this.position.copy(newPos);
+          } else {
+            const newFeetHeight = newGroundHeight + this.config.height;
+            const newDist = newPos.length();
+            
+            if (newDist < newFeetHeight) {
+              // Would go below ground - snap to ground
+              this.position.normalize().multiplyScalar(newFeetHeight);
+              this.velocity.set(0, 0, 0);
+              this.isGrounded = true;
+            } else {
+              // Free fall
+              this.position.copy(newPos);
+            }
+          }
+        }
+      } else {
+        // On ground - clear velocity
+        this.velocity.set(0, 0, 0);
+        
+        // Snap to ground surface
+        this.position.normalize().multiplyScalar(playerFeetHeight);
+      }
     }
     
     // Final collision check - revert if stuck in voxel
@@ -215,15 +258,15 @@ export class Player {
       this.velocity.set(0, 0, 0);
     }
     
-    // Core limit - never go below minimum radius
-    const minRadius = 0.08;
-    if (this.position.length() < minRadius) {
-      this.position.normalize().multiplyScalar(minRadius);
-      this.velocity.set(0, 0, 0);
-    }
-    
     // Update camera
     this.updateCamera();
+  }
+  
+  /**
+   * Check if player is inside the hollow core cavity.
+   */
+  public isInCore(coreRadius: number): boolean {
+    return this.position.length() < coreRadius;
   }
 
   private updateCamera(): void {

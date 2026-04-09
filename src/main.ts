@@ -53,20 +53,21 @@ function init() {
   worldRenderer.update();
   
   // --- CORE ORB (The prize at the center!) ---
-  const coreGeometry = new THREE.SphereGeometry(0.08, 32, 32);
+  const orbRadius = 0.04;
+  const coreGeometry = new THREE.SphereGeometry(orbRadius, 32, 32);
   const coreMaterial = new THREE.MeshStandardMaterial({
     color: 0xFFD700,
     emissive: 0xFFAA00,
-    emissiveIntensity: 0.5,
-    metalness: 0.8,
-    roughness: 0.2,
+    emissiveIntensity: 0.8,
+    metalness: 0.9,
+    roughness: 0.1,
   });
   const coreOrb = new THREE.Mesh(coreGeometry, coreMaterial);
   coreOrb.position.set(0, 0, 0);
   scene.add(coreOrb);
   
   // Core glow
-  const coreGlowGeometry = new THREE.SphereGeometry(0.12, 32, 32);
+  const coreGlowGeometry = new THREE.SphereGeometry(orbRadius * 2, 32, 32);
   const coreGlowMaterial = new THREE.ShaderMaterial({
     vertexShader: `
       varying vec3 vNormal;
@@ -78,7 +79,7 @@ function init() {
     fragmentShader: `
       varying vec3 vNormal;
       void main() {
-        float intensity = pow(0.6 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+        float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
         gl_FragColor = vec4(1.0, 0.8, 0.2, 1.0) * intensity;
       }
     `,
@@ -88,6 +89,11 @@ function init() {
   });
   const coreGlow = new THREE.Mesh(coreGlowGeometry, coreGlowMaterial);
   scene.add(coreGlow);
+  
+  // Core cavity light (so player can see inside)
+  const coreLight = new THREE.PointLight(0xFFAA00, 2, world.coreRadius * 3);
+  coreLight.position.set(0, 0, 0);
+  scene.add(coreLight);
 
   // --- PLAYER ---
   const startPos = new THREE.Vector3(0, BASE_RADIUS + 0.15, 0);
@@ -172,13 +178,22 @@ function init() {
     coreOrb.rotation.y += deltaTime * 0.5;
     coreGlow.rotation.y -= deltaTime * 0.3;
     
-    // Check if player reached the core
-    if (!hasOrb && player.getPosition().length() < 0.15) {
+    // Check if player reached the core and grabbed the orb
+    const distToCenter = player.getPosition().length();
+    if (!hasOrb && distToCenter < orbRadius + 0.05) {
       hasOrb = true;
       scene.remove(coreOrb);
       scene.remove(coreGlow);
-      ui.statusText.textContent = '🌟 You got the orb! Now bring it to the other side!';
+      scene.remove(coreLight);
+      ui.statusText.textContent = '🌟 You got the orb! Now dig to the ANTIPODE (opposite side)!';
       ui.statusText.style.color = '#FFD700';
+      console.log('Orb collected! Now reach the antipode.');
+    }
+    
+    // Show when player enters the core cavity
+    if (player.isInCore(world.coreRadius) && !hasOrb) {
+      ui.statusText.textContent = '🔮 You\'re in the core! Grab the golden orb!';
+      ui.statusText.style.color = '#FFAA00';
     }
     
     // Check win condition (reached antipode with orb)
@@ -196,7 +211,16 @@ function init() {
     
     // Update UI
     const dist = player.getPosition().length();
-    ui.depthText.textContent = `Depth: ${((BASE_RADIUS - dist) * 100).toFixed(1)}% to center`;
+    const depthPercent = ((BASE_RADIUS - dist) / (BASE_RADIUS - world.coreRadius) * 100);
+    const inCore = dist < world.coreRadius;
+    
+    if (inCore) {
+      ui.depthText.textContent = `📍 IN THE CORE! Distance from center: ${(dist * 100).toFixed(1)}cm`;
+    } else if (depthPercent > 0) {
+      ui.depthText.textContent = `⛏️ Depth: ${depthPercent.toFixed(1)}% (${(dist * 100).toFixed(0)}cm from center)`;
+    } else {
+      ui.depthText.textContent = `🌍 On surface (radius: ${(dist * 100).toFixed(0)}cm)`;
+    }
     
     // Update perf monitor
     const voxelCount = world.getAllVoxels().size;
