@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RadialGeodesicEngine } from './core/engine';
+import { WorldManager } from './core/world_manager';
+import { InteractionManager } from './core/interaction';
 
 function init() {
   // Scene setup
@@ -55,15 +57,13 @@ function init() {
       opacity: 0.8
     });
 
-    const voxelMesh = new THREE.Mesh(geometry, material);
-    scene.add(voxelMesh);
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
   }
 
   // Add the base geodesic sphere for reference (wireframe)
   const baseGeom = engine.getBaseMesh();
   const baseGeometry = new THREE.BufferGeometry();
-  const basePosArray = new Float32Array(baseGeom.vertices.length * 3); // Wait, baseGeom is GeodesicMesh interface
-  // Correcting for the interface:
   const basePositions = new Float32Array(baseGeom.vertices.length * 3);
   for (let i = 0; i < baseGeom.vertices.length; i++) {
     basePositions[i * 3] = baseGeom.vertices[i].x;
@@ -76,6 +76,58 @@ function init() {
   const baseMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.2 });
   const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
   scene.add(baseMesh);
+
+  // --- PHASE 4 TEST SETUP ---
+  const worldManager = new WorldManager();
+  const interactionManager = new InteractionManager(camera);
+
+  // Populate the world with some random voxels to click on
+  for (let i = 0; i < 100; i++) {
+    const r = Math.floor(Math.random() * 3) + 1; // Shells 1, 2, or 3
+    const cellID = Math.floor(Math.random() * triangleCount);
+
+    // Add to storage
+    worldManager.setVoxel(r, cellID, { materialType: 'dirt', lightLevel: 1, hardness: 1 });
+
+    // Create visual representation
+    const { vertices, indices } = engine.getVoxelGeometry(r, cellID);
+    const voxelGeom = new THREE.BufferGeometry();
+    const vPos = new Float32Array(vertices.length * 3);
+    for (let j = 0; j < vertices.length; j++) {
+      vPos[j * 3] = vertices[j].x;
+      vPos[j * 3 + 1] = vertices[j].y;
+      vPos[j * 3 + 2] = vertices[j].z;
+    }
+    voxelGeom.setAttribute('position', new THREE.BufferAttribute(vPos, 3));
+    voxelGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+    voxelGeom.computeVertexNormals();
+
+    const voxelMat = new THREE.MeshPhongMaterial({
+      color: Math.random() * 0xffffff,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.7
+    });
+
+    const voxelMesh = new THREE.Mesh(voxelGeom, voxelMat);
+    // Store metadata for raycasting
+    voxelMesh.userData.voxelInfo = { r, cellID };
+    scene.add(voxelMesh);
+  }
+
+  // Handle clicks for digging
+  window.addEventListener('click', (event) => {
+    const mouse = new THREE.Vector2(
+      (event.clientX / window.innerWidth) * 2 - 1,
+      -(event.clientY / window.innerHeight) * 2 + 1
+    );
+
+    const hit = interactionManager.raycast(mouse, scene);
+    if (hit) {
+      console.log('Hit voxel:', hit.r, hit.cellID);
+      interactionManager.dig(hit, worldManager, scene);
+    }
+  });
 
   // Resize handler
   window.addEventListener('resize', () => {

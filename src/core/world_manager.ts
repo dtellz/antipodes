@@ -59,4 +59,14 @@ export class WorldManager {
   public clear(): void {
     this.voxels.clear();
   }
+
+  /**
+   * Removes a voxel from the world.
+   * @param r The radial layer index.
+   * @param cellID The surface identifier (triangle index).
+   */
+  public removeVoxel(r: number, cellID: string | number): void {
+    const key = this._generateKey(r, cellID);
+    this.voxels.delete(key);
+  }
 }
