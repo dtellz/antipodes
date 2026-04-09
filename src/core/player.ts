@@ -171,16 +171,29 @@ export class Player {
     const inCoreCavity = groundHeight === 0;
     
     if (inCoreCavity) {
-      // In the hollow core - always falling toward center, no ground to stand on
+      // In the hollow core - floating/falling, no ground to stand on
       this.isGrounded = false;
       
-      // Apply gravity toward center
-      const gravityDir = this.localUp.clone().negate();
-      this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
+      // IMPORTANT: In the core, gravity pulls toward absolute center (0,0,0)
+      // NOT based on localUp, which would flip when crossing center
+      // This creates natural deceleration approaching center, then acceleration away
+      const distToCenter = this.position.length();
+      
+      if (distToCenter > 0.001) {
+        // Gravity direction is always toward (0,0,0)
+        const gravityDir = this.position.clone().normalize().negate();
+        
+        // Reduced gravity near center for smoother transition
+        const gravityStrength = this.config.gravity * Math.min(1, distToCenter / 0.1);
+        this.velocity.add(gravityDir.multiplyScalar(gravityStrength * deltaTime));
+      }
       
       // Apply velocity
       const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
       this.position.add(velocityStep);
+      
+      // Add some drag in the core to prevent infinite oscillation
+      this.velocity.multiplyScalar(0.995);
       
       // Check if we've exited the core on the other side
       const newGroundHeight = getGroundHeight(this.position);
