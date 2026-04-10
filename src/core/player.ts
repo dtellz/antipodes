@@ -351,4 +351,26 @@ export class Player {
   public isOnGround(): boolean {
     return this.isGrounded;
   }
+
+  /**
+   * Simulate a key press for mobile controls.
+   */
+  public simulateKeyDown(code: string): void {
+    this.keys.add(code);
+  }
+
+  /**
+   * Simulate a key release for mobile controls.
+   */
+  public simulateKeyUp(code: string): void {
+    this.keys.delete(code);
+  }
+
+  /**
+   * Rotate yaw and pitch for mobile touch look controls.
+   */
+  public rotateYawPitch(yawDelta: number, pitchDelta: number): void {
+    this.yaw += yawDelta;
+    this.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.pitch + pitchDelta));
+  }
 }
