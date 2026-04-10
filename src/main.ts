@@ -6,6 +6,7 @@ import { Player } from './core/player';
 import { DiggingSystem } from './core/digging';
 import { Minimap } from './core/minimap';
 import { CaveDecorator } from './core/caves';
+import { SurfaceDecorator } from './core/surface_decorations';
 
 // Game modes
 type GameMode = 'orbit' | 'player';
@@ -47,6 +48,89 @@ function setupCaveDecorations(world: VoxelWorld, decorator: CaveDecorator): void
   }
 
   console.log(`Added ${caveDecorators.length} cave decorations`);
+}
+
+/**
+ * Deterministic random from an integer seed.
+ */
+function seededRandom(seed: number): number {
+  const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/**
+ * Place trees, rocks, grass, and flowers on the planet surface.
+ */
+function setupSurfaceDecorations(world: VoxelWorld, scene: THREE.Scene): void {
+  const decorator = new SurfaceDecorator(scene);
+  let count = 0;
+  const maxDecorations = 300;
+
+  for (let cellID = 0; cellID < world.triangleCount; cellID++) {
+    if (count >= maxDecorations) break;
+
+    // Find the topmost voxel in this cell column
+    let topShell = -1;
+    for (let shell = world.numShells - 1; shell >= 0; shell--) {
+      if (world.hasVoxel(shell, cellID)) {
+        topShell = shell;
+        break;
+      }
+    }
+    if (topShell < 0) continue;
+
+    // Deterministic chance per cell
+    const rand = seededRandom(cellID);
+    if (rand > 0.1) continue;
+
+    const voxel = world.getVoxel(topShell, cellID);
+    if (!voxel) continue;
+
+    // Position on top of the voxel
+    const center = world.getCellCenter(topShell, cellID);
+    const dir = center.clone().normalize();
+    const outerR = topShell < world.numShells - 1
+      ? world.getShellRadius(topShell + 1)
+      : world.getShellRadius(topShell) + world.shellThickness;
+    const surfacePos = dir.multiplyScalar(outerR);
+
+    const biome = voxel.materialType;
+    const r2 = seededRandom(cellID + 7777);
+
+    if (biome === 'forest') {
+      if (r2 < 0.6) {
+        decorator.addTree(surfacePos, cellID);
+      } else if (r2 < 0.8) {
+        decorator.addRoundTree(surfacePos, cellID);
+      } else {
+        decorator.addFlower(surfacePos, cellID);
+      }
+      count++;
+    } else if (biome === 'plains') {
+      if (r2 < 0.4) {
+        decorator.addGrass(surfacePos, cellID);
+      } else if (r2 < 0.7) {
+        decorator.addFlower(surfacePos, cellID);
+      } else {
+        decorator.addRoundTree(surfacePos, cellID);
+      }
+      count++;
+    } else if (biome === 'hills') {
+      if (r2 < 0.5) {
+        decorator.addRock(surfacePos, cellID);
+      } else if (r2 < 0.8) {
+        decorator.addGrass(surfacePos, cellID);
+      } else {
+        decorator.addTree(surfacePos, cellID);
+      }
+      count++;
+    } else if (biome === 'mountains') {
+      decorator.addRock(surfacePos, cellID);
+      count++;
+    }
+  }
+
+  console.log(`Added ${count} surface decorations`);
 }
 
 function init() {
@@ -133,7 +217,7 @@ function init() {
 
   // --- PLAYER ---
   const startPos = new THREE.Vector3(0, BASE_RADIUS + 0.15, 0);
-  const player = new Player(startPos, camera);
+  const player = new Player(startPos, camera, scene);
   
   // --- DIGGING SYSTEM ---
   const diggingSystem = new DiggingSystem(world, scene);
@@ -149,6 +233,9 @@ function init() {
   // --- CAVE DECORATIONS ---
   const caveDecorator = new CaveDecorator(scene);
   setupCaveDecorations(world, caveDecorator);
+
+  // --- SURFACE DECORATIONS ---
+  setupSurfaceDecorations(world, scene);
   
   // --- GAME STATE ---
   let gameMode: GameMode = 'orbit';
@@ -255,7 +342,7 @@ function init() {
   document.addEventListener('mousedown', (e) => {
     if (gameMode === 'player' && e.button === 0 && !isTouchDevice()) {
       const lookDir = player.getLookDirection();
-      const result = diggingSystem.dig(player.camera.position.clone(), lookDir);
+      const result = diggingSystem.dig(player.getEyePosition(), lookDir);
 
       if (result) {
         worldRenderer.markDirty();
@@ -758,7 +845,7 @@ class MobileControls {
       this.digButton.style.transform = 'scale(0.95)';
 
       const lookDir = this.player.getLookDirection();
-      const result = this.diggingSystem.dig(this.player.camera.position.clone(), lookDir);
+      const result = this.diggingSystem.dig(this.player.getEyePosition(), lookDir);
       if (result) {
         this.worldRenderer.markDirty();
       }

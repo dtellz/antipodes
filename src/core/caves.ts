@@ -86,12 +86,12 @@ export interface CaveConfig {
 
 const DEFAULT_CAVE_CONFIG: CaveConfig = {
   seed: 54321,
-  caveFrequency: 3.0,
+  caveFrequency: 3.5,
   caveThreshold: 0.42,
   minCaveRadius: 0.25,
-  maxCaveRadius: 0.85,
-  wormFrequency: 2.0,
-  wormThreshold: 0.35,
+  maxCaveRadius: 0.88,
+  wormFrequency: 1.4,
+  wormThreshold: 0.18,
 };
 
 /**
@@ -111,6 +111,10 @@ export class CaveGenerator {
   /**
    * Check if a position should be a cave (empty space).
    * Returns true if this position should be carved out.
+   *
+   * Uses the "worm tunnel" technique: caves form where two independent
+   * noise fields both cross 0.5 simultaneously, creating continuous
+   * tube-shaped tunnels through 3D space.
    */
   public isCave(position: THREE.Vector3, baseRadius: number): boolean {
     const dist = position.length();
@@ -121,32 +125,34 @@ export class CaveGenerator {
       return false;
     }
 
-    const p = position.clone().normalize();
-    
-    // Main cave noise (creates large caverns)
-    const caveNoise = this.noise.fbm(
-      p.x * this.config.caveFrequency,
-      p.y * this.config.caveFrequency,
-      p.z * this.config.caveFrequency,
-      4
-    );
+    // Use actual 3D position (not normalized!) so caves are continuous across shells
+    const f1 = this.config.caveFrequency;
+    const px = position.x * f1;
+    const py = position.y * f1;
+    const pz = position.z * f1;
 
-    // Worm tunnel noise (creates connecting tunnels)
-    const wormNoise = this.wormNoise.fbm(
-      p.x * this.config.wormFrequency + dist * 2,
-      p.y * this.config.wormFrequency + dist * 2,
-      p.z * this.config.wormFrequency + dist * 2,
-      3
-    );
+    // Depth factor: wider caves at middle depths, thinner near boundaries
+    const depthFactor = 1.0 - Math.abs(normalizedDist - 0.55) * 1.8;
+    const clampedDepth = Math.max(0.15, Math.min(1.0, depthFactor));
+    const threshold = this.config.wormThreshold * clampedDepth;
 
-    // Depth factor - more caves in middle depths
-    const depthFactor = 1 - Math.abs(normalizedDist - 0.5) * 1.5;
-    
-    // Combine noises
-    const isCavern = caveNoise < this.config.caveThreshold * depthFactor;
-    const isTunnel = Math.abs(wormNoise - 0.5) < this.config.wormThreshold * 0.15;
+    // Primary worm tunnels: |noise1 - 0.5| + |noise2 - 0.5| < threshold
+    // Both noise fields must cross 0.5 near the same point, forming a tube
+    const n1 = this.noise.noise3D(px, py, pz);
+    const n2 = this.wormNoise.noise3D(px, py, pz);
+    const worm1 = Math.abs(n1 - 0.5) + Math.abs(n2 - 0.5);
 
-    return isCavern || isTunnel;
+    if (worm1 < threshold) return true;
+
+    // Secondary worm system at different frequency for branching variety
+    const f2 = f1 * this.config.wormFrequency;
+    const n3 = this.noise.noise3D(px * f2 + 31.7, py * f2 + 47.3, pz * f2 + 13.1);
+    const n4 = this.wormNoise.noise3D(px * f2 + 31.7, py * f2 + 47.3, pz * f2 + 13.1);
+    const worm2 = Math.abs(n3 - 0.5) + Math.abs(n4 - 0.5);
+
+    if (worm2 < threshold * 0.6) return true;
+
+    return false;
   }
 
   /**
@@ -159,11 +165,9 @@ export class CaveGenerator {
     lightColor: THREE.Color;
     lightIntensity: number;
   } {
-    const p = position.clone().normalize();
-    
-    // Use noise to determine cave features
-    const featureNoise = this.noise.noise3D(p.x * 10, p.y * 10, p.z * 10);
-    const colorNoise = this.wormNoise.noise3D(p.x * 5, p.y * 5, p.z * 5);
+    // Use actual 3D position for spatially coherent features
+    const featureNoise = this.noise.noise3D(position.x * 10, position.y * 10, position.z * 10);
+    const colorNoise = this.wormNoise.noise3D(position.x * 5, position.y * 5, position.z * 5);
 
     const hasCrystals = featureNoise > 0.7;
     const hasGlowMushrooms = featureNoise < 0.3 && featureNoise > 0.15;

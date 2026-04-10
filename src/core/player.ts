@@ -6,28 +6,25 @@ export interface PlayerConfig {
   gravity: number;
   height: number;
   radius: number;
+  maxFallSpeed: number;
 }
 
 const DEFAULT_CONFIG: PlayerConfig = {
-  moveSpeed: 0.5,
-  jumpForce: 0.8,
-  gravity: 2.5,
+  moveSpeed: 0.4,
+  jumpForce: 0.55,
+  gravity: 4.5,
   height: 0.08,
   radius: 0.03,
+  maxFallSpeed: 2.0,
 };
 
 /**
- * First-person player with spherical gravity (always pulled toward world center).
+ * Third-person player with spherical gravity (always pulled toward world center).
  *
- * Orientation strategy: instead of storing a scalar yaw relative to an
- * arbitrary worldUp-based reference frame (which has a singularity at the
- * poles and drifts as the player moves on the sphere), we store `lookForward`
- * as a world-space 3D vector that is always tangent to the sphere surface.
- *
- * Each frame, `updateLocalFrame()` parallel-transports `lookForward` onto the
- * new tangent plane at the player's updated position.  This means:
- *   - No reference to worldUp → no pole singularity / 180° flips.
- *   - Heading is preserved as the player walks → no curved-movement drift.
+ * Orientation strategy: `lookForward` is a world-space 3D vector that is always
+ * tangent to the sphere surface.  Each frame, `updateLocalFrame()` parallel-
+ * transports it onto the new tangent plane so the heading is preserved without
+ * any worldUp singularity.
  */
 export class Player {
   public position: THREE.Vector3;
@@ -35,6 +32,7 @@ export class Player {
   public camera: THREE.PerspectiveCamera;
 
   private config: PlayerConfig;
+  private scene: THREE.Scene;
   private isGrounded: boolean = false;
   private pitch: number = 0;
 
@@ -42,25 +40,39 @@ export class Player {
   private keys: Set<string> = new Set();
   private isPointerLocked: boolean = false;
 
-  // Local coordinate frame (relative to planet surface).
-  // lookForward is the canonical facing direction; localRight is derived from it.
-  // Neither depends on a fixed worldUp vector.
+  // Local coordinate frame (parallel-transported, no worldUp dependency).
   private localUp: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
   private lookForward: THREE.Vector3 = new THREE.Vector3(0, 0, -1);
   private localRight: THREE.Vector3 = new THREE.Vector3(1, 0, 0);
 
+  // Visual model
+  private playerModel: THREE.Group;
+
+  // Third-person camera
+  private readonly camArmLength = 0.22;
+  private readonly camArmHeight = 0.12;
+  private readonly camRightOffset = 0.05;
+
   constructor(
     startPosition: THREE.Vector3,
     camera: THREE.PerspectiveCamera,
+    scene: THREE.Scene,
     config: Partial<PlayerConfig> = {}
   ) {
     this.position = startPosition.clone();
     this.camera = camera;
+    this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
 
+    this.playerModel = this.createPlayerModel();
     this.setupInputListeners();
     this.updateLocalFrame();
+    this.updatePlayerModel();
   }
+
+  // ---------------------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------------------
 
   private setupInputListeners(): void {
     document.addEventListener('keydown', (e) => {
@@ -90,61 +102,50 @@ export class Player {
 
   private handleMouseMove(dx: number, dy: number): void {
     const sensitivity = 0.002;
-    // Yaw: rotate lookForward around the local up axis (no worldUp needed).
     this.lookForward.applyAxisAngle(this.localUp, -dx * sensitivity);
     this.lookForward.normalize();
     this.pitch -= dy * sensitivity;
     this.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.pitch));
   }
 
-  /**
-   * Update the local coordinate frame based on position using parallel transport.
-   *
-   * "Up" is always the radial direction (away from center).  `lookForward` is
-   * projected onto the new tangent plane so the player's facing direction is
-   * preserved without any worldUp reference.  This avoids the pole singularity
-   * that the old fixed-worldUp approach had.
-   */
+  // ---------------------------------------------------------------------------
+  // Local frame (parallel-transport)
+  // ---------------------------------------------------------------------------
+
   private updateLocalFrame(): void {
     if (this.position.lengthSq() < 0.0001) return;
 
     const targetUp = this.position.clone().normalize();
 
-    // Outside the core snap localUp instantly.  Inside the core (near center),
-    // blend gradually: a position of 0.05 units causes the same angular change
-    // as a large movement at the surface, which would spin the camera wildly.
-    // Smoothing limits the per-frame rotation to a visually stable amount.
     const dist = this.position.length();
-    const smoothRadius = 0.25; // blend below this radius
+    const smoothRadius = 0.25;
     if (dist < smoothRadius) {
-      // Blend factor: ~6% at center, ~40% at the edge of the smooth zone.
       const blend = Math.max(0.06, (dist / smoothRadius) * 0.4);
       this.localUp.lerp(targetUp, blend).normalize();
     } else {
       this.localUp.copy(targetUp);
     }
 
-    // Parallel-transport lookForward onto the (updated) tangent plane.
+    // Parallel-transport lookForward onto tangent plane.
     const upDot = this.lookForward.dot(this.localUp);
     this.lookForward.sub(this.localUp.clone().multiplyScalar(upDot));
 
     if (this.lookForward.lengthSq() > 0.0001) {
       this.lookForward.normalize();
     } else {
-      // Degenerate: lookForward was almost parallel to up.
       const fallback = Math.abs(this.localUp.x) < 0.9
         ? new THREE.Vector3(1, 0, 0)
         : new THREE.Vector3(0, 1, 0);
       this.lookForward.crossVectors(this.localUp, fallback).normalize();
     }
 
-    // right = forward × up  (right-hand rule keeps it consistent)
     this.localRight.crossVectors(this.lookForward, this.localUp).normalize();
   }
 
-  /**
-   * Get the direction the player is looking (includes pitch).
-   */
+  // ---------------------------------------------------------------------------
+  // Look direction helpers
+  // ---------------------------------------------------------------------------
+
   public getLookDirection(): THREE.Vector3 {
     return this.lookForward.clone()
       .applyAxisAngle(this.localRight, this.pitch)
@@ -152,22 +153,27 @@ export class Player {
   }
 
   /**
-   * Update player physics and position.
-   * @param checkCollision Function that returns true if position is blocked by a voxel
+   * Eye position for digging raycast (near the player's head).
    */
+  public getEyePosition(): THREE.Vector3 {
+    return this.position.clone()
+      .sub(this.localUp.clone().multiplyScalar(this.config.height * 0.15));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Physics update
+  // ---------------------------------------------------------------------------
+
   public update(
     deltaTime: number,
     getGroundHeight: (pos: THREE.Vector3) => number,
     checkCollision?: (pos: THREE.Vector3) => boolean
   ): void {
-    // Parallel-transport lookForward to current position before doing anything.
     this.updateLocalFrame();
 
     const oldPosition = this.position.clone();
 
-    // --- HORIZONTAL MOVEMENT ---
-    // lookForward and localRight are already in the tangent plane — no extra
-    // yaw rotation needed.
+    // --- HORIZONTAL MOVEMENT (great-circle rotation) ---
     const moveDir = new THREE.Vector3();
 
     if (this.keys.has('KeyW')) moveDir.add(this.lookForward);
@@ -175,17 +181,16 @@ export class Player {
     if (this.keys.has('KeyA')) moveDir.sub(this.localRight);
     if (this.keys.has('KeyD')) moveDir.add(this.localRight);
 
+    // Reduce air control when airborne
+    const airControl = this.isGrounded ? 1.0 : 0.45;
     const moveDistance = moveDir.lengthSq() > 0.0001
-      ? this.config.moveSpeed * deltaTime
+      ? this.config.moveSpeed * airControl * deltaTime
       : 0;
 
     if (moveDistance > 0) {
       const tangentDir = moveDir.normalize();
       const currentRadius = this.position.length();
 
-      // Rotate position around the axis perpendicular to both position and
-      // movement direction.  This moves the player along a great circle and
-      // always preserves their distance from the center.
       const rotationAxis = new THREE.Vector3()
         .crossVectors(this.position, tangentDir)
         .normalize();
@@ -193,7 +198,6 @@ export class Player {
       if (rotationAxis.lengthSq() > 0.0001) {
         const rotationAngle = moveDistance / currentRadius;
         const newPos = this.position.clone().applyAxisAngle(rotationAxis, rotationAngle);
-        // Re-normalize after rotation to prevent floating-point radius drift.
         newPos.normalize().multiplyScalar(currentRadius);
 
         const collision = checkCollision ? checkCollision(newPos) : false;
@@ -210,7 +214,7 @@ export class Player {
       ? currentGroundHeight + this.config.height
       : currentDist;
     const heightError = Math.abs(currentDist - targetHeight);
-    const stepHeight = 0.02;
+    const stepHeight = 0.025;
 
     if (currentGroundHeight > 0 && heightError > 0.001 && heightError <= stepHeight) {
       this.position.normalize().multiplyScalar(targetHeight);
@@ -219,124 +223,258 @@ export class Player {
     // Update frame after horizontal move so vertical physics uses correct up.
     this.updateLocalFrame();
 
+    // --- Keep velocity radial (prevent tangential drift on curved surface) ---
+    const radialSpeed = this.velocity.dot(this.localUp);
+    this.velocity.copy(this.localUp).multiplyScalar(radialSpeed);
+
     // --- VERTICAL PHYSICS ---
     const groundHeight = getGroundHeight(this.position);
     const distFromCenter = this.position.length();
     const inCoreCavity = groundHeight === 0;
 
     if (inCoreCavity) {
-      // Inside the hollow core — spherical gravity toward center.
-      this.isGrounded = false;
-      const distToCenter = this.position.length();
-      const orbGrabRadius = 0.08;
-
-      if (distToCenter > 0.0001) {
-        const gravityDir = this.position.clone().negate().normalize();
-        let gravityStrength = this.config.gravity;
-
-        if (distToCenter < orbGrabRadius) {
-          gravityStrength = this.config.gravity * 0.1;
-          this.velocity.multiplyScalar(0.95);
-        }
-
-        this.velocity.add(gravityDir.multiplyScalar(gravityStrength * deltaTime));
-      } else {
-        this.velocity.multiplyScalar(0.9);
-      }
-
-      const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
-      const tentativePos = this.position.clone().add(velocityStep);
-
-      // Pre-check: if the next step would embed us in a voxel wall, stop
-      // before moving.  Without this, the end-of-frame collision revert would
-      // zero velocity and re-accelerate the player into the same wall each
-      // frame, trapping them.
-      if (checkCollision && checkCollision(tentativePos)) {
-        this.velocity.set(0, 0, 0);
-      } else {
-        this.position.copy(tentativePos);
-
-        // Check if we've exited the core on the other side.
-        const newGroundHeight = getGroundHeight(this.position);
-        if (newGroundHeight > 0) {
-          const newFeetHeight = newGroundHeight + this.config.height;
-          if (this.position.length() < newFeetHeight) {
-            this.position.normalize().multiplyScalar(newFeetHeight);
-            this.velocity.set(0, 0, 0);
-            this.isGrounded = true;
-          }
-        }
-      }
+      this.handleCorePhysics(deltaTime, getGroundHeight, checkCollision);
     } else {
-      // Normal ground physics.
-      const playerFeetHeight = groundHeight + this.config.height;
-      const groundTolerance = 0.005;
-      this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
-
-      if (this.keys.has('Space') && this.isGrounded) {
-        this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
-        this.isGrounded = false;
-      }
-
-      if (!this.isGrounded) {
-        const gravityDir = this.localUp.clone().negate();
-        this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
-
-        const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
-        const newPos = this.position.clone().add(velocityStep);
-
-        if (checkCollision && checkCollision(newPos)) {
-          this.velocity.set(0, 0, 0);
-          this.isGrounded = true;
-        } else {
-          const newGroundHeight = getGroundHeight(newPos);
-
-          if (newGroundHeight === 0) {
-            this.position.copy(newPos);
-          } else {
-            const newFeetHeight = newGroundHeight + this.config.height;
-            const newDist = newPos.length();
-
-            if (newDist < newFeetHeight) {
-              this.position.normalize().multiplyScalar(newFeetHeight);
-              this.velocity.set(0, 0, 0);
-              this.isGrounded = true;
-            } else {
-              this.position.copy(newPos);
-            }
-          }
-        }
-      } else {
-        this.velocity.set(0, 0, 0);
-        this.position.normalize().multiplyScalar(playerFeetHeight);
-      }
+      this.handleSurfacePhysics(deltaTime, groundHeight, distFromCenter, getGroundHeight, checkCollision);
     }
 
-    // Final safety: if we somehow ended up inside a voxel, revert.
+    // Final safety: if embedded in voxel, revert.
     if (checkCollision && checkCollision(this.position)) {
       this.position.copy(oldPosition);
       this.velocity.set(0, 0, 0);
     }
 
-    this.updateCamera();
+    this.updatePlayerModel();
+    this.updateCamera(deltaTime);
   }
 
   /**
-   * Check if player is inside the hollow core cavity.
+   * Physics for inside the hollow core (floating, spherical gravity toward center).
    */
-  public isInCore(coreRadius: number): boolean {
-    return this.position.length() < coreRadius;
+  private handleCorePhysics(
+    deltaTime: number,
+    getGroundHeight: (pos: THREE.Vector3) => number,
+    checkCollision?: (pos: THREE.Vector3) => boolean
+  ): void {
+    this.isGrounded = false;
+    const distToCenter = this.position.length();
+    const orbGrabRadius = 0.08;
+
+    if (distToCenter > 0.0001) {
+      const gravityDir = this.position.clone().negate().normalize();
+      let gravityStrength = this.config.gravity;
+
+      if (distToCenter < orbGrabRadius) {
+        gravityStrength = this.config.gravity * 0.1;
+        this.velocity.multiplyScalar(0.95);
+      }
+
+      this.velocity.add(gravityDir.multiplyScalar(gravityStrength * deltaTime));
+    } else {
+      this.velocity.multiplyScalar(0.9);
+    }
+
+    // Air resistance in core
+    this.velocity.multiplyScalar(1 - 1.5 * deltaTime);
+
+    // Cap speed
+    if (this.velocity.length() > this.config.maxFallSpeed) {
+      this.velocity.normalize().multiplyScalar(this.config.maxFallSpeed);
+    }
+
+    const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
+    const tentativePos = this.position.clone().add(velocityStep);
+
+    if (checkCollision && checkCollision(tentativePos)) {
+      this.velocity.set(0, 0, 0);
+    } else {
+      this.position.copy(tentativePos);
+
+      const newGroundHeight = getGroundHeight(this.position);
+      if (newGroundHeight > 0) {
+        const newFeetHeight = newGroundHeight + this.config.height;
+        if (this.position.length() < newFeetHeight) {
+          this.position.normalize().multiplyScalar(newFeetHeight);
+          this.velocity.set(0, 0, 0);
+          this.isGrounded = true;
+        }
+      }
+    }
   }
 
-  private updateCamera(): void {
-    const headOffset = this.localUp.clone().multiplyScalar(this.config.height * 0.8);
-    this.camera.position.copy(this.position).add(headOffset);
+  /**
+   * Physics for on/above the planet surface (normal gravity).
+   */
+  private handleSurfacePhysics(
+    deltaTime: number,
+    groundHeight: number,
+    distFromCenter: number,
+    getGroundHeight: (pos: THREE.Vector3) => number,
+    checkCollision?: (pos: THREE.Vector3) => boolean
+  ): void {
+    const playerFeetHeight = groundHeight + this.config.height;
+    const groundTolerance = 0.005;
+    this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
 
+    // Jump
+    if (this.keys.has('Space') && this.isGrounded) {
+      this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
+      this.isGrounded = false;
+    }
+
+    if (!this.isGrounded) {
+      // Gravity (always toward center)
+      const gravityDir = this.localUp.clone().negate();
+      this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
+
+      // Air resistance
+      this.velocity.multiplyScalar(1 - 1.0 * deltaTime);
+
+      // Cap fall speed
+      if (this.velocity.length() > this.config.maxFallSpeed) {
+        this.velocity.normalize().multiplyScalar(this.config.maxFallSpeed);
+      }
+
+      const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
+      const newPos = this.position.clone().add(velocityStep);
+
+      if (checkCollision && checkCollision(newPos)) {
+        this.velocity.set(0, 0, 0);
+        this.isGrounded = true;
+      } else {
+        const newGroundHeight = getGroundHeight(newPos);
+
+        if (newGroundHeight === 0) {
+          // Falling into the core cavity
+          this.position.copy(newPos);
+        } else {
+          const newFeetHeight = newGroundHeight + this.config.height;
+          const newDist = newPos.length();
+
+          if (newDist < newFeetHeight) {
+            // Landed
+            this.position.normalize().multiplyScalar(newFeetHeight);
+            this.velocity.set(0, 0, 0);
+            this.isGrounded = true;
+          } else {
+            this.position.copy(newPos);
+          }
+        }
+      }
+    } else {
+      // Grounded: zero velocity, snap to surface
+      this.velocity.set(0, 0, 0);
+      this.position.normalize().multiplyScalar(playerFeetHeight);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Player model
+  // ---------------------------------------------------------------------------
+
+  private createPlayerModel(): THREE.Group {
+    const model = new THREE.Group();
+
+    // --- Head ---
+    const headGeom = new THREE.SphereGeometry(0.013, 8, 8);
+    const headMat = new THREE.MeshLambertMaterial({ color: 0xFFD5A0 });
+    const head = new THREE.Mesh(headGeom, headMat);
+    head.position.y = 0.068;
+    model.add(head);
+
+    // --- Body ---
+    const bodyGeom = new THREE.CylinderGeometry(0.012, 0.014, 0.035, 8);
+    const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3377CC });
+    const body = new THREE.Mesh(bodyGeom, bodyMat);
+    body.position.y = 0.0375;
+    model.add(body);
+
+    // --- Legs ---
+    const legGeom = new THREE.CylinderGeometry(0.005, 0.005, 0.02, 6);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x334488 });
+    const leftLeg = new THREE.Mesh(legGeom, legMat);
+    leftLeg.position.set(-0.007, 0.01, 0);
+    model.add(leftLeg);
+    const rightLeg = new THREE.Mesh(legGeom, legMat);
+    rightLeg.position.set(0.007, 0.01, 0);
+    model.add(rightLeg);
+
+    // --- Arms ---
+    const armGeom = new THREE.CylinderGeometry(0.004, 0.004, 0.025, 6);
+    const leftArm = new THREE.Mesh(armGeom, bodyMat);
+    leftArm.position.set(-0.017, 0.04, 0);
+    leftArm.rotation.z = 0.2;
+    model.add(leftArm);
+    const rightArm = new THREE.Mesh(armGeom, bodyMat);
+    rightArm.position.set(0.017, 0.04, 0);
+    rightArm.rotation.z = -0.2;
+    model.add(rightArm);
+
+    // --- Backpack (shows facing direction) ---
+    const bpGeom = new THREE.BoxGeometry(0.010, 0.012, 0.006);
+    const bpMat = new THREE.MeshLambertMaterial({ color: 0xCC6600 });
+    const backpack = new THREE.Mesh(bpGeom, bpMat);
+    backpack.position.set(0, 0.042, 0.012);
+    model.add(backpack);
+
+    this.scene.add(model);
+    return model;
+  }
+
+  private updatePlayerModel(): void {
+    // Model origin is at feet; player position is at head level.
+    const feetPos = this.position.clone()
+      .sub(this.localUp.clone().multiplyScalar(this.config.height));
+    this.playerModel.position.copy(feetPos);
+    this.playerModel.up.copy(this.localUp);
+    this.playerModel.lookAt(feetPos.clone().add(this.lookForward));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Third-person camera
+  // ---------------------------------------------------------------------------
+
+  private updateCamera(deltaTime: number): void {
+    // Reference: player's mid-body
+    const playerCenter = this.position.clone()
+      .sub(this.localUp.clone().multiplyScalar(this.config.height * 0.4));
+
+    // Camera arm: behind the player, angled by pitch
+    const behind = this.lookForward.clone().negate().multiplyScalar(this.camArmLength);
+    const up = this.localUp.clone().multiplyScalar(this.camArmHeight);
+    const right = this.localRight.clone().multiplyScalar(this.camRightOffset);
+
+    // Pitch tilts the arm vertically
+    const pitchUp = this.localUp.clone()
+      .multiplyScalar(Math.sin(-this.pitch * 0.5) * this.camArmLength * 0.5);
+
+    const targetCamPos = playerCenter.clone().add(behind).add(up).add(right).add(pitchUp);
+
+    // Prevent camera from going below the planet surface
+    const minRadius = this.position.length() + 0.02;
+    if (targetCamPos.length() < minRadius) {
+      targetCamPos.normalize().multiplyScalar(minRadius);
+    }
+
+    // Smooth follow (frame-rate independent)
+    const smooth = 1 - Math.exp(-12 * deltaTime);
+    this.camera.position.lerp(targetCamPos, smooth);
+
+    // Look-at: a point ahead of the player in the look direction
     const lookDir = this.getLookDirection();
-    const lookTarget = this.camera.position.clone().add(lookDir);
+    const lookAtPoint = playerCenter.clone()
+      .add(lookDir.clone().multiplyScalar(0.12));
 
     this.camera.up.copy(this.localUp);
-    this.camera.lookAt(lookTarget);
+    this.camera.lookAt(lookAtPoint);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public helpers
+  // ---------------------------------------------------------------------------
+
+  public isInCore(coreRadius: number): boolean {
+    return this.position.length() < coreRadius;
   }
 
   public getPosition(): THREE.Vector3 {
@@ -355,9 +493,6 @@ export class Player {
     this.keys.delete(code);
   }
 
-  /**
-   * Rotate facing direction for mobile touch look controls.
-   */
   public rotateYawPitch(yawDelta: number, pitchDelta: number): void {
     this.lookForward.applyAxisAngle(this.localUp, yawDelta);
     this.lookForward.normalize();
