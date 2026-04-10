@@ -136,14 +136,33 @@ export class Minimap {
     ctx.fillStyle = '#FF6600';
     ctx.fillText('GOAL', antiX - 12, antiY + 15);
 
-    // Draw player position
-    // Project 3D position to 2D (use XY plane, ignore Z for simplicity)
+    // Draw player position.
+    // Project 3D position to 2D cross-section while preserving the true radial
+    // depth.  The naïve approach (playerDir.x, playerDir.y) gives a zero-length
+    // 2D vector for any position on the Z axis — e.g. (0,0,1.15) would place
+    // the dot at the planet center instead of on the surface ring.
+    //
+    // Fix: normalize the XY components independently so the 2D dot is always
+    // at the correct distance from center, then fall back to the equator edge
+    // when the player is near the Z axis.
     const playerDist = this.playerPos.length();
     const playerDir = this.playerPos.clone().normalize();
-    
-    // Use the dominant axis for 2D projection
-    const px = center + playerDir.x * playerDist * scale;
-    const py = center - playerDir.y * playerDist * scale;
+
+    const dir2dLen = Math.sqrt(playerDir.x * playerDir.x + playerDir.y * playerDir.y);
+    let px: number, py: number;
+    let arrow2dX: number, arrow2dY: number;
+    if (dir2dLen > 0.01) {
+      px = center + (playerDir.x / dir2dLen) * playerDist * scale;
+      py = center - (playerDir.y / dir2dLen) * playerDist * scale;
+      arrow2dX = playerDir.x / dir2dLen;
+      arrow2dY = -(playerDir.y / dir2dLen);
+    } else {
+      // Player is near the Z axis; show on the equator edge.
+      px = center + playerDist * scale;
+      py = center;
+      arrow2dX = 1;
+      arrow2dY = 0;
+    }
 
     // Player trail/direction indicator
     ctx.beginPath();
@@ -164,10 +183,9 @@ export class Minimap {
 
     // Player direction arrow
     const arrowLen = 8;
-    const arrowDir = playerDir.clone();
     ctx.beginPath();
     ctx.moveTo(px, py);
-    ctx.lineTo(px + arrowDir.x * arrowLen, py - arrowDir.y * arrowLen);
+    ctx.lineTo(px + arrow2dX * arrowLen, py + arrow2dY * arrowLen);
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = 2;
     ctx.stroke();

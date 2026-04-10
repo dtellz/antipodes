@@ -16,34 +16,37 @@ const DEFAULT_CONFIG: PlayerConfig = {
   radius: 0.03,
 };
 
-// Debug logging - set to false to disable
-const DEBUG_MOVEMENT = true;
-function logMovement(...args: unknown[]): void {
-  if (DEBUG_MOVEMENT) {
-    console.log('[Player]', ...args);
-  }
-}
-
 /**
  * First-person player with spherical gravity (always pulled toward world center).
+ *
+ * Orientation strategy: instead of storing a scalar yaw relative to an
+ * arbitrary worldUp-based reference frame (which has a singularity at the
+ * poles and drifts as the player moves on the sphere), we store `lookForward`
+ * as a world-space 3D vector that is always tangent to the sphere surface.
+ *
+ * Each frame, `updateLocalFrame()` parallel-transports `lookForward` onto the
+ * new tangent plane at the player's updated position.  This means:
+ *   - No reference to worldUp → no pole singularity / 180° flips.
+ *   - Heading is preserved as the player walks → no curved-movement drift.
  */
 export class Player {
   public position: THREE.Vector3;
   public velocity: THREE.Vector3 = new THREE.Vector3();
   public camera: THREE.PerspectiveCamera;
-  
+
   private config: PlayerConfig;
   private isGrounded: boolean = false;
-  private yaw: number = 0;
   private pitch: number = 0;
-  
+
   // Input state
   private keys: Set<string> = new Set();
   private isPointerLocked: boolean = false;
-  
-  // Local coordinate frame (relative to planet surface)
+
+  // Local coordinate frame (relative to planet surface).
+  // lookForward is the canonical facing direction; localRight is derived from it.
+  // Neither depends on a fixed worldUp vector.
   private localUp: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
-  private localForward: THREE.Vector3 = new THREE.Vector3(0, 0, -1);
+  private lookForward: THREE.Vector3 = new THREE.Vector3(0, 0, -1);
   private localRight: THREE.Vector3 = new THREE.Vector3(1, 0, 0);
 
   constructor(
@@ -54,7 +57,7 @@ export class Player {
     this.position = startPosition.clone();
     this.camera = camera;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    
+
     this.setupInputListeners();
     this.updateLocalFrame();
   }
@@ -63,21 +66,21 @@ export class Player {
     document.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
     });
-    
+
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
     });
-    
+
     document.addEventListener('mousemove', (e) => {
       if (this.isPointerLocked) {
         this.handleMouseMove(e.movementX, e.movementY);
       }
     });
-    
+
     document.addEventListener('pointerlockchange', () => {
       this.isPointerLocked = document.pointerLockElement !== null;
     });
-    
+
     document.addEventListener('click', () => {
       if (!this.isPointerLocked) {
         document.body.requestPointerLock();
@@ -87,49 +90,65 @@ export class Player {
 
   private handleMouseMove(dx: number, dy: number): void {
     const sensitivity = 0.002;
-    this.yaw -= dx * sensitivity;
+    // Yaw: rotate lookForward around the local up axis (no worldUp needed).
+    this.lookForward.applyAxisAngle(this.localUp, -dx * sensitivity);
+    this.lookForward.normalize();
     this.pitch -= dy * sensitivity;
     this.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.pitch));
   }
 
   /**
-   * Update the local coordinate frame based on position.
-   * "Up" is always away from the planet center (radial direction).
-   * This means gravity always pulls toward center regardless of which
-   * hemisphere the player is in.
+   * Update the local coordinate frame based on position using parallel transport.
+   *
+   * "Up" is always the radial direction (away from center).  `lookForward` is
+   * projected onto the new tangent plane so the player's facing direction is
+   * preserved without any worldUp reference.  This avoids the pole singularity
+   * that the old fixed-worldUp approach had.
    */
   private updateLocalFrame(): void {
-    // "Up" is always the radial direction (away from center)
-    // This naturally handles the antipode - when you cross the center,
-    // your "up" flips because your position vector flips
-    if (this.position.lengthSq() > 0.0001) {
-      this.localUp.copy(this.position).normalize();
+    if (this.position.lengthSq() < 0.0001) return;
+
+    const targetUp = this.position.clone().normalize();
+
+    // Outside the core snap localUp instantly.  Inside the core (near center),
+    // blend gradually: a position of 0.05 units causes the same angular change
+    // as a large movement at the surface, which would spin the camera wildly.
+    // Smoothing limits the per-frame rotation to a visually stable amount.
+    const dist = this.position.length();
+    const smoothRadius = 0.25; // blend below this radius
+    if (dist < smoothRadius) {
+      // Blend factor: ~6% at center, ~40% at the edge of the smooth zone.
+      const blend = Math.max(0.06, (dist / smoothRadius) * 0.4);
+      this.localUp.lerp(targetUp, blend).normalize();
+    } else {
+      this.localUp.copy(targetUp);
     }
-    
-    // Maintain forward direction tangent to sphere
-    // Use world up as reference, but handle poles
-    const worldUp = new THREE.Vector3(0, 1, 0);
-    if (Math.abs(this.localUp.dot(worldUp)) > 0.99) {
-      worldUp.set(1, 0, 0);
+
+    // Parallel-transport lookForward onto the (updated) tangent plane.
+    const upDot = this.lookForward.dot(this.localUp);
+    this.lookForward.sub(this.localUp.clone().multiplyScalar(upDot));
+
+    if (this.lookForward.lengthSq() > 0.0001) {
+      this.lookForward.normalize();
+    } else {
+      // Degenerate: lookForward was almost parallel to up.
+      const fallback = Math.abs(this.localUp.x) < 0.9
+        ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(0, 1, 0);
+      this.lookForward.crossVectors(this.localUp, fallback).normalize();
     }
-    
-    this.localRight.crossVectors(worldUp, this.localUp).normalize();
-    this.localForward.crossVectors(this.localUp, this.localRight).normalize();
+
+    // right = forward × up  (right-hand rule keeps it consistent)
+    this.localRight.crossVectors(this.lookForward, this.localUp).normalize();
   }
 
   /**
-   * Get the direction the player is looking.
+   * Get the direction the player is looking (includes pitch).
    */
   public getLookDirection(): THREE.Vector3 {
-    // Rotate forward by yaw around local up
-    const rotatedForward = this.localForward.clone()
-      .applyAxisAngle(this.localUp, this.yaw);
-    
-    // Rotate by pitch around local right (after yaw)
-    const rotatedRight = this.localRight.clone()
-      .applyAxisAngle(this.localUp, this.yaw);
-    
-    return rotatedForward.applyAxisAngle(rotatedRight, this.pitch).normalize();
+    return this.lookForward.clone()
+      .applyAxisAngle(this.localRight, this.pitch)
+      .normalize();
   }
 
   /**
@@ -137,192 +156,171 @@ export class Player {
    * @param checkCollision Function that returns true if position is blocked by a voxel
    */
   public update(
-    deltaTime: number, 
+    deltaTime: number,
     getGroundHeight: (pos: THREE.Vector3) => number,
     checkCollision?: (pos: THREE.Vector3) => boolean
   ): void {
+    // Parallel-transport lookForward to current position before doing anything.
     this.updateLocalFrame();
-    
+
     const oldPosition = this.position.clone();
-    
-    // Get movement input
+
+    // --- HORIZONTAL MOVEMENT ---
+    // lookForward and localRight are already in the tangent plane — no extra
+    // yaw rotation needed.
     const moveDir = new THREE.Vector3();
-    
-    if (this.keys.has('KeyW')) moveDir.add(this.localForward);
-    if (this.keys.has('KeyS')) moveDir.sub(this.localForward);
+
+    if (this.keys.has('KeyW')) moveDir.add(this.lookForward);
+    if (this.keys.has('KeyS')) moveDir.sub(this.lookForward);
     if (this.keys.has('KeyA')) moveDir.sub(this.localRight);
     if (this.keys.has('KeyD')) moveDir.add(this.localRight);
-    
-    // Apply yaw rotation to movement
-    if (moveDir.lengthSq() > 0) {
-      moveDir.applyAxisAngle(this.localUp, this.yaw);
-      moveDir.normalize();
-    }
-    
-    // Try horizontal movement
-    const moveVelocity = moveDir.multiplyScalar(this.config.moveSpeed * deltaTime);
-    const newHorizontalPos = this.position.clone().add(moveVelocity);
-    const posBefore = this.position.clone();
 
-    // Check horizontal collision
-    const collision = checkCollision ? checkCollision(newHorizontalPos) : false;
-    let actuallyMoved = false;
-    if (!collision) {
-      const distMoved = this.position.distanceTo(newHorizontalPos);
-      if (distMoved > 0.0001) {
-        this.position.copy(newHorizontalPos);
-        actuallyMoved = true;
-        logMovement('Moved:', posBefore.toArray().map(v => v.toFixed(3)), '->', this.position.toArray().map(v => v.toFixed(3)));
+    const moveDistance = moveDir.lengthSq() > 0.0001
+      ? this.config.moveSpeed * deltaTime
+      : 0;
+
+    if (moveDistance > 0) {
+      const tangentDir = moveDir.normalize();
+      const currentRadius = this.position.length();
+
+      // Rotate position around the axis perpendicular to both position and
+      // movement direction.  This moves the player along a great circle and
+      // always preserves their distance from the center.
+      const rotationAxis = new THREE.Vector3()
+        .crossVectors(this.position, tangentDir)
+        .normalize();
+
+      if (rotationAxis.lengthSq() > 0.0001) {
+        const rotationAngle = moveDistance / currentRadius;
+        const newPos = this.position.clone().applyAxisAngle(rotationAxis, rotationAngle);
+        // Re-normalize after rotation to prevent floating-point radius drift.
+        newPos.normalize().multiplyScalar(currentRadius);
+
+        const collision = checkCollision ? checkCollision(newPos) : false;
+        if (!collision) {
+          this.position.copy(newPos);
+        }
       }
-    } else if (moveDir.lengthSq() > 0) {
-      logMovement('BLOCKED by collision at:', newHorizontalPos.toArray().map(v => v.toFixed(3)));
     }
 
-    // CRITICAL: After horizontal movement, re-project player to correct surface height
-    // This ensures player stays "on the ground" and doesn't float away
+    // Auto-step: small height adjustments when grounded (terrain following).
     const currentGroundHeight = getGroundHeight(this.position);
-
-    // Only re-project if: 1) we actually moved, or 2) we're significantly off the surface (prevents drift)
     const currentDist = this.position.length();
-    const targetHeight = currentGroundHeight > 0 ? currentGroundHeight + this.config.height : currentDist;
+    const targetHeight = currentGroundHeight > 0
+      ? currentGroundHeight + this.config.height
+      : currentDist;
     const heightError = Math.abs(currentDist - targetHeight);
-    const needsReprojection = actuallyMoved || heightError > 0.01; // Only reproject if moved or significantly off surface
+    const stepHeight = 0.02;
 
-    if (needsReprojection && currentGroundHeight > 0) {
-      // Normalize position and set to correct radius
+    if (currentGroundHeight > 0 && heightError > 0.001 && heightError <= stepHeight) {
       this.position.normalize().multiplyScalar(targetHeight);
-      if (actuallyMoved) {
-        logMovement('Moved & re-projected to height:', targetHeight.toFixed(3));
-      }
     }
 
-    // Update local frame after horizontal move (now at correct surface position)
+    // Update frame after horizontal move so vertical physics uses correct up.
     this.updateLocalFrame();
-    
-    // Ground check
+
+    // --- VERTICAL PHYSICS ---
     const groundHeight = getGroundHeight(this.position);
     const distFromCenter = this.position.length();
-    
-    // Special case: inside the core cavity (groundHeight == 0 means no ground)
     const inCoreCavity = groundHeight === 0;
-    
-    if (inCoreCavity) {
-      // In the hollow core - floating/falling, no ground to stand on
-      this.isGrounded = false;
-      logMovement('CORE PHYSICS - dist:', distFromCenter.toFixed(3), 'velocity:', this.velocity.length().toFixed(3));
 
-      // GRAVITY: Always pulls toward the single center point (0,0,0) where the orb is
+    if (inCoreCavity) {
+      // Inside the hollow core — spherical gravity toward center.
+      this.isGrounded = false;
       const distToCenter = this.position.length();
-      const orbGrabRadius = 0.08; // Distance where player can grab orb
+      const orbGrabRadius = 0.08;
 
       if (distToCenter > 0.0001) {
-        // Direction from player TO center (0,0,0)
-        const toCenter = this.position.clone().negate();
-        const gravityDir = toCenter.normalize();
-
-        // SOFT LANDING ZONE: Near the center, gravity is much weaker
-        // This prevents oscillation and lets player stabilize to grab orb
+        const gravityDir = this.position.clone().negate().normalize();
         let gravityStrength = this.config.gravity;
 
         if (distToCenter < orbGrabRadius) {
-          // Within orb grab range - very weak gravity (10% normal)
-          // This creates a "floaty" zone where player can hover near center
           gravityStrength = this.config.gravity * 0.1;
-
-          // Also apply drag to slow down any remaining velocity
           this.velocity.multiplyScalar(0.95);
         }
 
         this.velocity.add(gravityDir.multiplyScalar(gravityStrength * deltaTime));
       } else {
-        // Essentially at center - zero out tiny movements
         this.velocity.multiplyScalar(0.9);
       }
 
-      // Apply velocity
       const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
-      this.position.add(velocityStep);
+      const tentativePos = this.position.clone().add(velocityStep);
 
-      // Check if we've exited the core on the other side
-      const newGroundHeight = getGroundHeight(this.position);
-      if (newGroundHeight > 0) {
-        // Exited core - check for ground collision
-        const newFeetHeight = newGroundHeight + this.config.height;
-        if (this.position.length() < newFeetHeight) {
-          this.position.normalize().multiplyScalar(newFeetHeight);
-          this.velocity.set(0, 0, 0);
-          this.isGrounded = true;
+      // Pre-check: if the next step would embed us in a voxel wall, stop
+      // before moving.  Without this, the end-of-frame collision revert would
+      // zero velocity and re-accelerate the player into the same wall each
+      // frame, trapping them.
+      if (checkCollision && checkCollision(tentativePos)) {
+        this.velocity.set(0, 0, 0);
+      } else {
+        this.position.copy(tentativePos);
+
+        // Check if we've exited the core on the other side.
+        const newGroundHeight = getGroundHeight(this.position);
+        if (newGroundHeight > 0) {
+          const newFeetHeight = newGroundHeight + this.config.height;
+          if (this.position.length() < newFeetHeight) {
+            this.position.normalize().multiplyScalar(newFeetHeight);
+            this.velocity.set(0, 0, 0);
+            this.isGrounded = true;
+          }
         }
       }
     } else {
-      // Normal ground physics
+      // Normal ground physics.
       const playerFeetHeight = groundHeight + this.config.height;
-      
-      // Grounded if within small tolerance of ground
       const groundTolerance = 0.005;
       this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
-      
-      // Jump
+
       if (this.keys.has('Space') && this.isGrounded) {
         this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
         this.isGrounded = false;
       }
-      
-      // Apply gravity
+
       if (!this.isGrounded) {
         const gravityDir = this.localUp.clone().negate();
         this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
-        
-        // Calculate new position from velocity
+
         const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
         const newPos = this.position.clone().add(velocityStep);
-        
-        // Check collision at new position
+
         if (checkCollision && checkCollision(newPos)) {
-          // Hit a voxel - stop and stay at current position
           this.velocity.set(0, 0, 0);
           this.isGrounded = true;
         } else {
-          // Check ground at new position
           const newGroundHeight = getGroundHeight(newPos);
-          
-          // If entering core cavity, just fall through
+
           if (newGroundHeight === 0) {
             this.position.copy(newPos);
           } else {
             const newFeetHeight = newGroundHeight + this.config.height;
             const newDist = newPos.length();
-            
+
             if (newDist < newFeetHeight) {
-              // Would go below ground - snap to ground
               this.position.normalize().multiplyScalar(newFeetHeight);
               this.velocity.set(0, 0, 0);
               this.isGrounded = true;
             } else {
-              // Free fall
               this.position.copy(newPos);
             }
           }
         }
       } else {
-        // On ground - clear velocity
         this.velocity.set(0, 0, 0);
-        
-        // Snap to ground surface
         this.position.normalize().multiplyScalar(playerFeetHeight);
       }
     }
-    
-    // Final collision check - revert if stuck in voxel
+
+    // Final safety: if we somehow ended up inside a voxel, revert.
     if (checkCollision && checkCollision(this.position)) {
       this.position.copy(oldPosition);
       this.velocity.set(0, 0, 0);
     }
-    
-    // Update camera
+
     this.updateCamera();
   }
-  
+
   /**
    * Check if player is inside the hollow core cavity.
    */
@@ -331,15 +329,12 @@ export class Player {
   }
 
   private updateCamera(): void {
-    // Position camera at player head
     const headOffset = this.localUp.clone().multiplyScalar(this.config.height * 0.8);
     this.camera.position.copy(this.position).add(headOffset);
-    
-    // Look direction
+
     const lookDir = this.getLookDirection();
     const lookTarget = this.camera.position.clone().add(lookDir);
-    
-    // Set camera orientation
+
     this.camera.up.copy(this.localUp);
     this.camera.lookAt(lookTarget);
   }
@@ -352,25 +347,20 @@ export class Player {
     return this.isGrounded;
   }
 
-  /**
-   * Simulate a key press for mobile controls.
-   */
   public simulateKeyDown(code: string): void {
     this.keys.add(code);
   }
 
-  /**
-   * Simulate a key release for mobile controls.
-   */
   public simulateKeyUp(code: string): void {
     this.keys.delete(code);
   }
 
   /**
-   * Rotate yaw and pitch for mobile touch look controls.
+   * Rotate facing direction for mobile touch look controls.
    */
   public rotateYawPitch(yawDelta: number, pitchDelta: number): void {
-    this.yaw += yawDelta;
+    this.lookForward.applyAxisAngle(this.localUp, yawDelta);
+    this.lookForward.normalize();
     this.pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.pitch + pitchDelta));
   }
 }
