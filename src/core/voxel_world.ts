@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { generateGeodesicSphere, GeodesicMesh } from './geodesic';
 import { TerrainGenerator, BiomeType } from './terrain';
+import { CaveGenerator } from './caves';
 
 export interface VoxelData {
   materialType: string;
@@ -17,6 +18,8 @@ export class VoxelWorld {
   private geodesicMesh: GeodesicMesh;
   private voxels: Map<string, VoxelData> = new Map();
   private terrain: TerrainGenerator;
+  private caveGenerator: CaveGenerator;
+  private caveCells: Set<string> = new Set(); // Track cave locations for decoration
   
   public readonly subdivisionLevel: number;
   public readonly numShells: number;
@@ -41,6 +44,7 @@ export class VoxelWorld {
     this.geodesicMesh = generateGeodesicSphere(subdivisionLevel, 1.0);
     this.triangleCount = this.geodesicMesh.indices.length / 3;
     this.terrain = new TerrainGenerator(42);
+    this.caveGenerator = new CaveGenerator({ seed: 54321 });
     
     console.log(`VoxelWorld: ${this.triangleCount} cells per shell, ${numShells} shells = ${this.triangleCount * numShells} total voxels`);
   }
@@ -50,10 +54,10 @@ export class VoxelWorld {
   }
 
   /**
-   * Initialize the world with terrain-based voxels.
+   * Initialize the world with terrain-based voxels and caves.
    */
   public generateTerrain(): void {
-    console.log('Generating volumetric terrain...');
+    console.log('Generating volumetric terrain with caves...');
     
     for (let shell = 0; shell < this.numShells; shell++) {
       const shellRadius = this.getShellRadius(shell);
@@ -64,6 +68,13 @@ export class VoxelWorld {
         
         // Only create voxels below the surface
         if (shellRadius <= surfaceHeight) {
+          // Check if this should be a cave
+          if (this.caveGenerator.isCave(center, this.baseRadius)) {
+            // This is a cave - don't create a voxel, but track it
+            this.caveCells.add(this.getKey(shell, cellID));
+            continue;
+          }
+          
           const terrainData = this.terrain.getTerrainAt(center);
           
           // Determine material based on depth
@@ -96,7 +107,21 @@ export class VoxelWorld {
       }
     }
     
-    console.log(`Generated ${this.voxels.size} voxels`);
+    console.log(`Generated ${this.voxels.size} voxels with ${this.caveCells.size} cave cells`);
+  }
+
+  /**
+   * Get cave cells for decoration placement.
+   */
+  public getCaveCells(): Set<string> {
+    return this.caveCells;
+  }
+
+  /**
+   * Get cave generator for decoration data.
+   */
+  public getCaveGenerator(): CaveGenerator {
+    return this.caveGenerator;
   }
 
   /**

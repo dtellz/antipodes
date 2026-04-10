@@ -4,9 +4,50 @@ import { VoxelWorld } from './core/voxel_world';
 import { WorldRenderer } from './core/world_renderer';
 import { Player } from './core/player';
 import { DiggingSystem } from './core/digging';
+import { Minimap } from './core/minimap';
+import { CaveDecorator } from './core/caves';
 
 // Game modes
 type GameMode = 'orbit' | 'player';
+
+/**
+ * Set up cave decorations (crystals, mushrooms, lights) at cave locations.
+ */
+function setupCaveDecorations(world: VoxelWorld, decorator: CaveDecorator): void {
+  const caveGenerator = world.getCaveGenerator();
+  const caveCells = world.getCaveCells();
+  const caveDecorators: { pos: THREE.Vector3; hasCrystals: boolean }[] = [];
+
+  // Sample cave cells for decoration placement
+  let processed = 0;
+  for (const key of caveCells) {
+    processed++;
+    if (processed % 5 !== 0) continue; // Only decorate every 5th cave cell to avoid clutter
+
+    const [shellStr, cellIDStr] = key.split('-');
+    const shell = parseInt(shellStr);
+    const cellID = parseInt(cellIDStr);
+
+    const center = world.getCellCenter(shell, cellID);
+    const caveData = caveGenerator.getCaveData(center);
+
+    if (caveData.hasCrystals || caveData.hasGlowMushrooms) {
+      caveDecorators.push({ pos: center, hasCrystals: caveData.hasCrystals });
+    }
+  }
+
+  // Add decorations
+  for (const { pos, hasCrystals } of caveDecorators.slice(0, 200)) { // Limit to 200 decorations
+    const caveData = caveGenerator.getCaveData(pos);
+    if (hasCrystals) {
+      decorator.addCrystal(pos, caveData.lightColor);
+    } else if (caveData.hasGlowMushrooms) {
+      decorator.addMushroom(pos, caveData.lightColor);
+    }
+  }
+
+  console.log(`Added ${caveDecorators.length} cave decorations`);
+}
 
 function init() {
   // Scene setup
@@ -89,11 +130,6 @@ function init() {
   });
   const coreGlow = new THREE.Mesh(coreGlowGeometry, coreGlowMaterial);
   scene.add(coreGlow);
-  
-  // Core cavity light (so player can see inside)
-  const coreLight = new THREE.PointLight(0xFFAA00, 2, world.coreRadius * 3);
-  coreLight.position.set(0, 0, 0);
-  scene.add(coreLight);
 
   // --- PLAYER ---
   const startPos = new THREE.Vector3(0, BASE_RADIUS + 0.15, 0);
@@ -101,6 +137,18 @@ function init() {
   
   // --- DIGGING SYSTEM ---
   const diggingSystem = new DiggingSystem(world, scene);
+  
+  // --- MINIMAP ---
+  const minimap = new Minimap({
+    size: 160,
+    planetRadius: BASE_RADIUS,
+    coreRadius: world.coreRadius,
+  });
+  minimap.setStartDirection(startPos.clone().normalize());
+  
+  // --- CAVE DECORATIONS ---
+  const caveDecorator = new CaveDecorator(scene);
+  setupCaveDecorations(world, caveDecorator);
   
   // --- GAME STATE ---
   let gameMode: GameMode = 'orbit';
@@ -184,7 +232,6 @@ function init() {
       hasOrb = true;
       scene.remove(coreOrb);
       scene.remove(coreGlow);
-      scene.remove(coreLight);
       ui.statusText.textContent = '🌟 You got the orb! Now dig to the ANTIPODE (opposite side)!';
       ui.statusText.style.color = '#FFD700';
       console.log('Orb collected! Now reach the antipode.');
@@ -221,6 +268,9 @@ function init() {
     } else {
       ui.depthText.textContent = `🌍 On surface (radius: ${(dist * 100).toFixed(0)}cm)`;
     }
+    
+    // Update minimap
+    minimap.update(player.getPosition(), hasOrb);
     
     // Update perf monitor
     const voxelCount = world.getAllVoxels().size;
