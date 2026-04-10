@@ -255,7 +255,7 @@ function init() {
   document.addEventListener('mousedown', (e) => {
     if (gameMode === 'player' && e.button === 0 && !isTouchDevice()) {
       const lookDir = player.getLookDirection();
-      const result = diggingSystem.dig(player.getPosition(), lookDir);
+      const result = diggingSystem.dig(player.camera.position.clone(), lookDir);
 
       if (result) {
         worldRenderer.markDirty();
@@ -758,7 +758,7 @@ class MobileControls {
       this.digButton.style.transform = 'scale(0.95)';
 
       const lookDir = this.player.getLookDirection();
-      const result = this.diggingSystem.dig(this.player.getPosition(), lookDir);
+      const result = this.diggingSystem.dig(this.player.camera.position.clone(), lookDir);
       if (result) {
         this.worldRenderer.markDirty();
       }
