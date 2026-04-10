@@ -1,5 +1,11 @@
 import { defineConfig } from 'vite';
 
+// GitHub Pages base path - repository name for project page
+// Change to '/' if using a custom domain
 export default defineConfig({
-  // Vite configuration can go here if needed
+  base: '/antipodes/',
+  build: {
+    outDir: 'dist',
+    sourcemap: true,
+  },
 });
