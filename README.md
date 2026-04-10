@@ -2,6 +2,13 @@
 
 An spherical trigonometry experiment where a ball in the center of the sphere is the core of the game, you dig to find it and take it to the antipodes! (If they let you >.<)
 
+
+<p align="center">
+  <img src="./sphere.png" width="200" height="118" style="margin-right: 1em">
+  <img src="./sphere2.png" width="200" height="118">
+</p>
+
+
 ## Technical Specification: Radial-Geodesic Voxel Engine (RGVE)
 
 ### 1. Project VISION:
