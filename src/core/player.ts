@@ -173,28 +173,39 @@ export class Player {
     if (inCoreCavity) {
       // In the hollow core - floating/falling, no ground to stand on
       this.isGrounded = false;
-      
-      // IMPORTANT: In the core, gravity pulls toward absolute center (0,0,0)
-      // NOT based on localUp, which would flip when crossing center
-      // This creates natural deceleration approaching center, then acceleration away
+
+      // GRAVITY: Always pulls toward the single center point (0,0,0) where the orb is
       const distToCenter = this.position.length();
-      
-      if (distToCenter > 0.001) {
-        // Gravity direction is always toward (0,0,0)
-        const gravityDir = this.position.clone().normalize().negate();
-        
-        // Reduced gravity near center for smoother transition
-        const gravityStrength = this.config.gravity * Math.min(1, distToCenter / 0.1);
+      const orbGrabRadius = 0.08; // Distance where player can grab orb
+
+      if (distToCenter > 0.0001) {
+        // Direction from player TO center (0,0,0)
+        const toCenter = this.position.clone().negate();
+        const gravityDir = toCenter.normalize();
+
+        // SOFT LANDING ZONE: Near the center, gravity is much weaker
+        // This prevents oscillation and lets player stabilize to grab orb
+        let gravityStrength = this.config.gravity;
+
+        if (distToCenter < orbGrabRadius) {
+          // Within orb grab range - very weak gravity (10% normal)
+          // This creates a "floaty" zone where player can hover near center
+          gravityStrength = this.config.gravity * 0.1;
+
+          // Also apply drag to slow down any remaining velocity
+          this.velocity.multiplyScalar(0.95);
+        }
+
         this.velocity.add(gravityDir.multiplyScalar(gravityStrength * deltaTime));
+      } else {
+        // Essentially at center - zero out tiny movements
+        this.velocity.multiplyScalar(0.9);
       }
-      
+
       // Apply velocity
       const velocityStep = this.velocity.clone().multiplyScalar(deltaTime);
       this.position.add(velocityStep);
-      
-      // Add some drag in the core to prevent infinite oscillation
-      this.velocity.multiplyScalar(0.995);
-      
+
       // Check if we've exited the core on the other side
       const newGroundHeight = getGroundHeight(this.position);
       if (newGroundHeight > 0) {
