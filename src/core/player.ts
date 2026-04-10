@@ -16,6 +16,14 @@ const DEFAULT_CONFIG: PlayerConfig = {
   radius: 0.03,
 };
 
+// Debug logging - set to false to disable
+const DEBUG_MOVEMENT = true;
+function logMovement(...args: unknown[]): void {
+  if (DEBUG_MOVEMENT) {
+    console.log('[Player]', ...args);
+  }
+}
+
 /**
  * First-person player with spherical gravity (always pulled toward world center).
  */
@@ -154,13 +162,41 @@ export class Player {
     // Try horizontal movement
     const moveVelocity = moveDir.multiplyScalar(this.config.moveSpeed * deltaTime);
     const newHorizontalPos = this.position.clone().add(moveVelocity);
-    
+    const posBefore = this.position.clone();
+
     // Check horizontal collision
-    if (!checkCollision || !checkCollision(newHorizontalPos)) {
-      this.position.copy(newHorizontalPos);
+    const collision = checkCollision ? checkCollision(newHorizontalPos) : false;
+    let actuallyMoved = false;
+    if (!collision) {
+      const distMoved = this.position.distanceTo(newHorizontalPos);
+      if (distMoved > 0.0001) {
+        this.position.copy(newHorizontalPos);
+        actuallyMoved = true;
+        logMovement('Moved:', posBefore.toArray().map(v => v.toFixed(3)), '->', this.position.toArray().map(v => v.toFixed(3)));
+      }
+    } else if (moveDir.lengthSq() > 0) {
+      logMovement('BLOCKED by collision at:', newHorizontalPos.toArray().map(v => v.toFixed(3)));
     }
-    
-    // Update local frame after horizontal move
+
+    // CRITICAL: After horizontal movement, re-project player to correct surface height
+    // This ensures player stays "on the ground" and doesn't float away
+    const currentGroundHeight = getGroundHeight(this.position);
+
+    // Only re-project if: 1) we actually moved, or 2) we're significantly off the surface (prevents drift)
+    const currentDist = this.position.length();
+    const targetHeight = currentGroundHeight > 0 ? currentGroundHeight + this.config.height : currentDist;
+    const heightError = Math.abs(currentDist - targetHeight);
+    const needsReprojection = actuallyMoved || heightError > 0.01; // Only reproject if moved or significantly off surface
+
+    if (needsReprojection && currentGroundHeight > 0) {
+      // Normalize position and set to correct radius
+      this.position.normalize().multiplyScalar(targetHeight);
+      if (actuallyMoved) {
+        logMovement('Moved & re-projected to height:', targetHeight.toFixed(3));
+      }
+    }
+
+    // Update local frame after horizontal move (now at correct surface position)
     this.updateLocalFrame();
     
     // Ground check
@@ -173,6 +209,7 @@ export class Player {
     if (inCoreCavity) {
       // In the hollow core - floating/falling, no ground to stand on
       this.isGrounded = false;
+      logMovement('CORE PHYSICS - dist:', distFromCenter.toFixed(3), 'velocity:', this.velocity.length().toFixed(3));
 
       // GRAVITY: Always pulls toward the single center point (0,0,0) where the orb is
       const distToCenter = this.position.length();

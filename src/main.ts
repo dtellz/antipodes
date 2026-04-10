@@ -154,26 +154,87 @@ function init() {
   let gameMode: GameMode = 'orbit';
   let hasOrb = false;
   let gameWon = false;
+  let gameStarted = false;
   const startDirection = startPos.clone().normalize();
-  
+
+  // --- START SCREEN ---
+  const startScreen = document.createElement('div');
+  startScreen.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 2000;
+    transition: opacity 0.5s ease;
+  `;
+
+  const title = document.createElement('h1');
+  title.textContent = 'ANTIPODES';
+  title.style.cssText = `
+    color: #FFD700;
+    font-family: Arial, sans-serif;
+    font-size: 48px;
+    margin-bottom: 10px;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+  `;
+
+  const subtitle = document.createElement('p');
+  subtitle.textContent = 'Dig to the core, grab the orb, reach the antipode!';
+  subtitle.style.cssText = `
+    color: #FFFFFF;
+    font-family: Arial, sans-serif;
+    font-size: 18px;
+    margin-bottom: 30px;
+    text-shadow: 1px 1px 2px black;
+  `;
+
+  const startButton = document.createElement('button');
+  startButton.textContent = 'START GAME';
+  startButton.style.cssText = `
+    padding: 20px 60px;
+    font-size: 24px;
+    font-family: Arial, sans-serif;
+    font-weight: bold;
+    color: #000;
+    background: linear-gradient(135deg, #FFD700, #FFA500);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(255, 215, 0, 0.4);
+    transition: transform 0.2s, box-shadow 0.2s;
+  `;
+  startButton.onmouseenter = () => {
+    startButton.style.transform = 'scale(1.05)';
+    startButton.style.boxShadow = '0 6px 20px rgba(255, 215, 0, 0.6)';
+  };
+  startButton.onmouseleave = () => {
+    startButton.style.transform = 'scale(1)';
+    startButton.style.boxShadow = '0 4px 15px rgba(255, 215, 0, 0.4)';
+  };
+  startButton.onclick = () => {
+    gameStarted = true;
+    gameMode = 'player';
+    orbitControls.enabled = false;
+    startScreen.style.opacity = '0';
+    setTimeout(() => startScreen.remove(), 500);
+    ui.modeText.textContent = 'Player Mode';
+  };
+
+  startScreen.appendChild(title);
+  startScreen.appendChild(subtitle);
+  startScreen.appendChild(startButton);
+  document.body.appendChild(startScreen);
+
   // --- UI ---
   const ui = createUI();
+  ui.modeText.textContent = 'Spectator Mode - Click START GAME to play';
   const perfMonitor = new PerfMonitor();
-  
-  // Mode switching
-  document.addEventListener('keydown', (e) => {
-    if (e.code === 'Tab') {
-      e.preventDefault();
-      gameMode = gameMode === 'orbit' ? 'player' : 'orbit';
-      orbitControls.enabled = gameMode === 'orbit';
-      
-      if (gameMode === 'orbit') {
-        document.exitPointerLock();
-      }
-      
-      ui.modeText.textContent = gameMode === 'orbit' ? 'Spectator Mode (Tab to switch)' : 'Player Mode (Tab to switch)';
-    }
-  });
   
   // Digging on click
   document.addEventListener('mousedown', (e) => {
