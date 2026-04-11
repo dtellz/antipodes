@@ -338,17 +338,30 @@ function init() {
     mobileControls = new MobileControls(player, diggingSystem, worldRenderer);
   }
 
-  // Digging on click (desktop only - mobile uses button)
+  // Digging on left click, cannon on right click (desktop)
   document.addEventListener('mousedown', (e) => {
-    if (gameMode === 'player' && e.button === 0 && !isTouchDevice()) {
+    if (gameMode !== 'player' || isTouchDevice()) return;
+
+    if (e.button === 0) {
+      // Left click — pickaxe dig
       const lookDir = player.getLookDirection();
       const result = diggingSystem.dig(player.getEyePosition(), lookDir);
-
       if (result) {
         worldRenderer.markDirty();
-        console.log(`Dug voxel at shell ${result.shell}, cell ${result.cellID}`);
+      }
+    } else if (e.button === 2) {
+      // Right click — cannon blast
+      const lookDir = player.getLookDirection();
+      const result = diggingSystem.cannon(player.getEyePosition(), lookDir);
+      if (result) {
+        worldRenderer.markDirty();
       }
     }
+  });
+
+  // Prevent context menu so right-click fires the cannon
+  document.addEventListener('contextmenu', (e) => {
+    if (gameMode === 'player') e.preventDefault();
   });
 
   // Resize handler
@@ -379,9 +392,17 @@ function init() {
       orbitControls.update();
     }
     
-    // Update digging debris
+    // Update digging debris & effects
     diggingSystem.update(deltaTime);
-    
+
+    // Screen shake from cannon
+    if (diggingSystem.shakeIntensity > 0) {
+      const s = diggingSystem.shakeIntensity * 0.012;
+      camera.position.x += (Math.random() - 0.5) * s;
+      camera.position.y += (Math.random() - 0.5) * s;
+      camera.position.z += (Math.random() - 0.5) * s;
+    }
+
     // Update world mesh if needed
     worldRenderer.update();
     
@@ -535,9 +556,11 @@ function createUI(): { modeText: HTMLElement; statusText: HTMLElement; depthText
     <br>
     <strong>Controls:</strong><br>
     WASD - Move<br>
+    Shift - Sprint<br>
     Mouse - Look<br>
-    Click - Dig<br>
-    Space - Jump<br>
+    Left Click - Dig<br>
+    Right Click - Cannon<br>
+    Space - Jump (x2)<br>
     Tab - Toggle mode
   `;
   controls.style.marginTop = '20px';
@@ -602,6 +625,7 @@ class MobileControls {
   private lookJoystickDelta: { x: number; y: number } = { x: 0, y: 0 };
   private jumpButton!: HTMLElement;
   private digButton!: HTMLElement;
+  private cannonButton!: HTMLElement;
   private container: HTMLElement;
 
   constructor(player: Player, diggingSystem: DiggingSystem, worldRenderer: WorldRenderer) {
@@ -613,6 +637,7 @@ class MobileControls {
     this.lookJoystick = this.createLookJoystick();
     this.jumpButton = this.createJumpButton();
     this.digButton = this.createDigButton();
+    this.cannonButton = this.createCannonButton();
     this.setupEventListeners();
   }
 
@@ -758,6 +783,32 @@ class MobileControls {
     return button;
   }
 
+  private createCannonButton(): HTMLElement {
+    const button = document.createElement('div');
+    button.innerHTML = '💥';
+    button.style.cssText = `
+      position: absolute;
+      bottom: 240px;
+      left: 30px;
+      width: 60px;
+      height: 60px;
+      background: rgba(200, 150, 50, 0.6);
+      border: 3px solid rgba(255, 255, 255, 0.5);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      pointer-events: auto;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+    `;
+    this.container.appendChild(button);
+    return button;
+  }
+
   private setupEventListeners(): void {
     // Move joystick touch events (left joystick)
     this.moveJoystick.addEventListener('touchstart', (e) => {
@@ -855,6 +906,25 @@ class MobileControls {
       e.preventDefault();
       this.digButton.style.background = 'rgba(200, 100, 100, 0.6)';
       this.digButton.style.transform = 'scale(1)';
+    });
+
+    // Cannon button
+    this.cannonButton.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      this.cannonButton.style.background = 'rgba(200, 150, 50, 0.9)';
+      this.cannonButton.style.transform = 'scale(0.95)';
+
+      const lookDir = this.player.getLookDirection();
+      const result = this.diggingSystem.cannon(this.player.getEyePosition(), lookDir);
+      if (result) {
+        this.worldRenderer.markDirty();
+      }
+    }, { passive: false });
+
+    this.cannonButton.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      this.cannonButton.style.background = 'rgba(200, 150, 50, 0.6)';
+      this.cannonButton.style.transform = 'scale(1)';
     });
   }
 

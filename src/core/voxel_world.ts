@@ -20,7 +20,11 @@ export class VoxelWorld {
   private terrain: TerrainGenerator;
   private caveGenerator: CaveGenerator;
   private caveCells: Set<string> = new Set(); // Track cave locations for decoration
-  
+
+  // Structure groups: clusters of ~6 adjacent triangles
+  private cellToGroup: Int32Array = new Int32Array(0);
+  private groupToCells: number[][] = [];
+
   public readonly subdivisionLevel: number;
   public readonly numShells: number;
   public readonly shellThickness: number;
@@ -40,13 +44,91 @@ export class VoxelWorld {
     this.baseRadius = baseRadius;
     this.shellThickness = shellThickness;
     this.coreRadius = 0.15; // Hollow core where the orb sits
-    
+
     this.geodesicMesh = generateGeodesicSphere(subdivisionLevel, 1.0);
     this.triangleCount = this.geodesicMesh.indices.length / 3;
     this.terrain = new TerrainGenerator(42);
     this.caveGenerator = new CaveGenerator({ seed: 54321 });
-    
-    console.log(`VoxelWorld: ${this.triangleCount} cells per shell, ${numShells} shells = ${this.triangleCount * numShells} total voxels`);
+
+    this.buildStructureGroups();
+
+    console.log(`VoxelWorld: ${this.triangleCount} cells per shell, ${numShells} shells, ${this.groupToCells.length} structure groups`);
+  }
+
+  /**
+   * Build edge-adjacency and partition all triangles into structure groups of ~6.
+   */
+  private buildStructureGroups(): void {
+    const triCount = this.triangleCount;
+    const indices = this.geodesicMesh.indices;
+
+    // Build edge → triangle map
+    const edgeToTris = new Map<string, number[]>();
+    for (let cellID = 0; cellID < triCount; cellID++) {
+      const v0 = indices[cellID * 3];
+      const v1 = indices[cellID * 3 + 1];
+      const v2 = indices[cellID * 3 + 2];
+      const edges: [number, number][] = [
+        [Math.min(v0, v1), Math.max(v0, v1)],
+        [Math.min(v1, v2), Math.max(v1, v2)],
+        [Math.min(v2, v0), Math.max(v2, v0)],
+      ];
+      for (const [a, b] of edges) {
+        const key = `${a}-${b}`;
+        let list = edgeToTris.get(key);
+        if (!list) { list = []; edgeToTris.set(key, list); }
+        list.push(cellID);
+      }
+    }
+
+    // Build adjacency list from edges
+    const adjacency: number[][] = new Array(triCount);
+    for (let i = 0; i < triCount; i++) adjacency[i] = [];
+    for (const tris of edgeToTris.values()) {
+      if (tris.length === 2) {
+        adjacency[tris[0]].push(tris[1]);
+        adjacency[tris[1]].push(tris[0]);
+      }
+    }
+
+    // Greedy BFS grouping into clusters of 6
+    const assigned = new Uint8Array(triCount);
+    this.cellToGroup = new Int32Array(triCount);
+    this.groupToCells = [];
+    let groupID = 0;
+
+    for (let seed = 0; seed < triCount; seed++) {
+      if (assigned[seed]) continue;
+
+      const group: number[] = [seed];
+      assigned[seed] = 1;
+      let head = 0;
+
+      while (group.length < 6 && head < group.length) {
+        const current = group[head++];
+        for (const neighbor of adjacency[current]) {
+          if (group.length >= 6) break;
+          if (assigned[neighbor]) continue;
+          assigned[neighbor] = 1;
+          group.push(neighbor);
+        }
+      }
+
+      for (const cellID of group) {
+        this.cellToGroup[cellID] = groupID;
+      }
+      this.groupToCells.push(group);
+      groupID++;
+    }
+  }
+
+  /**
+   * Get the list of cellIDs that belong to the same structure group as `cellID`.
+   */
+  public getStructureGroup(cellID: number): number[] {
+    const groupID = this.cellToGroup[cellID];
+    if (groupID === undefined || groupID < 0) return [cellID];
+    return this.groupToCells[groupID];
   }
 
   private getKey(shell: number, cellID: number): string {

@@ -2,7 +2,9 @@ import * as THREE from 'three';
 
 export interface PlayerConfig {
   moveSpeed: number;
+  sprintMultiplier: number;
   jumpForce: number;
+  doubleJumpForce: number;
   gravity: number;
   height: number;
   radius: number;
@@ -10,12 +12,14 @@ export interface PlayerConfig {
 }
 
 const DEFAULT_CONFIG: PlayerConfig = {
-  moveSpeed: 0.4,
-  jumpForce: 0.55,
-  gravity: 4.5,
+  moveSpeed: 0.55,
+  sprintMultiplier: 1.6,
+  jumpForce: 0.85,
+  doubleJumpForce: 0.72,
+  gravity: 3.6,
   height: 0.08,
   radius: 0.03,
-  maxFallSpeed: 2.0,
+  maxFallSpeed: 2.8,
 };
 
 /**
@@ -40,6 +44,22 @@ export class Player {
   private keys: Set<string> = new Set();
   private isPointerLocked: boolean = false;
 
+  // --- Platformer jump state ---
+  private hasDoubleJumped: boolean = false;
+  private coyoteTimer: number = 0;
+  private jumpBufferTimer: number = 0;
+  private jumpHeld: boolean = false;
+  private wasGrounded: boolean = false;
+  private landingSquash: number = 0;          // 0..1 visual squash on landing
+  private airTime: number = 0;                // time spent in the air (for landing impact)
+
+  // Jump tuning constants
+  private readonly coyoteTime = 0.12;         // grace period after leaving edge
+  private readonly jumpBufferTime = 0.15;     // pre-land jump input window
+  private readonly fallGravityMul = 1.7;      // snappier descent
+  private readonly apexGravityMul = 0.55;     // hang time near peak
+  private readonly apexSpeedThreshold = 0.18; // radial speed threshold for apex zone
+
   // Local coordinate frame (parallel-transported, no worldUp dependency).
   private localUp: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
   private lookForward: THREE.Vector3 = new THREE.Vector3(0, 0, -1);
@@ -52,6 +72,11 @@ export class Player {
   private readonly camArmLength = 0.22;
   private readonly camArmHeight = 0.12;
   private readonly camRightOffset = 0.05;
+  private currentArmLength: number = 0.22;    // smoothed arm length for caves
+  private currentArmHeight: number = 0.12;    // smoothed arm height for caves
+
+  // Stored collision check for camera occlusion resolution
+  private checkCollisionFn?: (pos: THREE.Vector3) => boolean;
 
   constructor(
     startPosition: THREE.Vector3,
@@ -77,10 +102,17 @@ export class Player {
   private setupInputListeners(): void {
     document.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
+      if (e.code === 'Space') {
+        this.jumpBufferTimer = this.jumpBufferTime;
+        this.jumpHeld = true;
+      }
     });
 
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
+      if (e.code === 'Space') {
+        this.jumpHeld = false;
+      }
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -169,7 +201,18 @@ export class Player {
     getGroundHeight: (pos: THREE.Vector3) => number,
     checkCollision?: (pos: THREE.Vector3) => boolean
   ): void {
+    this.checkCollisionFn = checkCollision;
     this.updateLocalFrame();
+
+    // --- Tick jump timers ---
+    this.jumpBufferTimer = Math.max(0, this.jumpBufferTimer - deltaTime);
+    if (this.isGrounded) {
+      this.coyoteTimer = this.coyoteTime;
+      this.airTime = 0;
+    } else {
+      this.coyoteTimer = Math.max(0, this.coyoteTimer - deltaTime);
+      this.airTime += deltaTime;
+    }
 
     const oldPosition = this.position.clone();
 
@@ -181,10 +224,13 @@ export class Player {
     if (this.keys.has('KeyA')) moveDir.sub(this.localRight);
     if (this.keys.has('KeyD')) moveDir.add(this.localRight);
 
-    // Reduce air control when airborne
-    const airControl = this.isGrounded ? 1.0 : 0.45;
+    const sprinting = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    const sprintMul = sprinting && this.isGrounded ? this.config.sprintMultiplier : 1.0;
+
+    // Air control: 80% (responsive in air, full on ground)
+    const airControl = this.isGrounded ? 1.0 : 0.80;
     const moveDistance = moveDir.lengthSq() > 0.0001
-      ? this.config.moveSpeed * airControl * deltaTime
+      ? this.config.moveSpeed * sprintMul * airControl * deltaTime
       : 0;
 
     if (moveDistance > 0) {
@@ -224,8 +270,10 @@ export class Player {
     this.updateLocalFrame();
 
     // --- Keep velocity radial (prevent tangential drift on curved surface) ---
-    const radialSpeed = this.velocity.dot(this.localUp);
-    this.velocity.copy(this.localUp).multiplyScalar(radialSpeed);
+    // Use position directly so gravity is always one direction: from center outward
+    const outward = this.position.clone().normalize();
+    const radialSpeed = this.velocity.dot(outward);
+    this.velocity.copy(outward).multiplyScalar(radialSpeed);
 
     // --- VERTICAL PHYSICS ---
     const groundHeight = getGroundHeight(this.position);
@@ -244,6 +292,11 @@ export class Player {
       this.velocity.set(0, 0, 0);
     }
 
+    // --- Landing squash decay ---
+    this.landingSquash *= Math.max(0, 1 - 8 * deltaTime);
+    if (this.landingSquash < 0.01) this.landingSquash = 0;
+
+    this.wasGrounded = this.isGrounded;
     this.updatePlayerModel();
     this.updateCamera(deltaTime);
   }
@@ -303,7 +356,44 @@ export class Player {
   }
 
   /**
+   * Attempt a jump. Returns true if a jump was executed.
+   * Handles grounded jump, coyote jump, and double jump.
+   */
+  private tryJump(): boolean {
+    // Gravity direction: always radially outward from world center
+    const outward = this.position.clone().normalize();
+
+    // Grounded or coyote-time jump
+    if (this.isGrounded || this.coyoteTimer > 0) {
+      this.velocity.copy(outward.clone().multiplyScalar(this.config.jumpForce));
+      // Nudge position outward to cleanly clear the ground tolerance
+      this.position.add(outward.clone().multiplyScalar(0.012));
+      this.isGrounded = false;
+      this.coyoteTimer = 0;
+      this.hasDoubleJumped = false;
+      this.jumpBufferTimer = 0;
+      return true;
+    }
+
+    // Double jump (only once per airborne period)
+    if (!this.hasDoubleJumped) {
+      // Kill any downward velocity first, then apply double jump force
+      const radialSpeed = this.velocity.dot(outward);
+      if (radialSpeed < 0) {
+        this.velocity.sub(outward.clone().multiplyScalar(radialSpeed));
+      }
+      this.velocity.add(outward.clone().multiplyScalar(this.config.doubleJumpForce));
+      this.hasDoubleJumped = true;
+      this.jumpBufferTimer = 0;
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Physics for on/above the planet surface (normal gravity).
+   * Features: coyote time, jump buffering, double jump, asymmetric gravity.
    */
   private handleSurfacePhysics(
     deltaTime: number,
@@ -313,22 +403,44 @@ export class Player {
     checkCollision?: (pos: THREE.Vector3) => boolean
   ): void {
     const playerFeetHeight = groundHeight + this.config.height;
-    const groundTolerance = 0.005;
+    const groundTolerance = 0.008;
     this.isGrounded = distFromCenter <= playerFeetHeight + groundTolerance;
 
-    // Jump
-    if (this.keys.has('Space') && this.isGrounded) {
-      this.velocity.copy(this.localUp.clone().multiplyScalar(this.config.jumpForce));
-      this.isGrounded = false;
+    // --- Landing detection (for squash) ---
+    if (this.isGrounded && !this.wasGrounded) {
+      this.landingSquash = Math.min(1, this.airTime * 2);
+      this.hasDoubleJumped = false;
+    }
+
+    // --- Jump: either from buffer or direct input ---
+    if (this.jumpBufferTimer > 0) {
+      this.tryJump();
     }
 
     if (!this.isGrounded) {
-      // Gravity (always toward center)
-      const gravityDir = this.localUp.clone().negate();
-      this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * deltaTime));
+      // Gravity direction: always straight toward world center (core orb)
+      const outward = this.position.clone().normalize();
+      const gravityDir = outward.clone().negate();
 
-      // Air resistance
-      this.velocity.multiplyScalar(1 - 1.0 * deltaTime);
+      // --- Asymmetric gravity ---
+      const radialSpeed = this.velocity.dot(outward);
+      let gravMul: number;
+
+      if (radialSpeed < -this.apexSpeedThreshold) {
+        // Falling: heavier gravity for snappy descent
+        gravMul = this.fallGravityMul;
+      } else if (Math.abs(radialSpeed) < this.apexSpeedThreshold) {
+        // Apex: lighter gravity for hang time
+        gravMul = this.apexGravityMul;
+      } else {
+        // Rising: normal gravity
+        gravMul = 1.0;
+      }
+
+      this.velocity.add(gravityDir.multiplyScalar(this.config.gravity * gravMul * deltaTime));
+
+      // Light air resistance
+      this.velocity.multiplyScalar(1 - 0.5 * deltaTime);
 
       // Cap fall speed
       if (this.velocity.length() > this.config.maxFallSpeed) {
@@ -417,6 +529,20 @@ export class Player {
     backpack.position.set(0, 0.042, 0.012);
     model.add(backpack);
 
+    // --- Cannon (held in right hand, pointing forward -Z) ---
+    const cannonMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
+    // Barrel
+    const barrelGeom = new THREE.CylinderGeometry(0.003, 0.004, 0.035, 6);
+    const barrel = new THREE.Mesh(barrelGeom, cannonMat);
+    barrel.rotation.x = Math.PI / 2; // point along -Z
+    barrel.position.set(0.019, 0.045, -0.022);
+    model.add(barrel);
+    // Grip / body
+    const gripGeom = new THREE.BoxGeometry(0.006, 0.010, 0.010);
+    const grip = new THREE.Mesh(gripGeom, cannonMat);
+    grip.position.set(0.019, 0.042, -0.004);
+    model.add(grip);
+
     this.scene.add(model);
     return model;
   }
@@ -428,10 +554,19 @@ export class Player {
     this.playerModel.position.copy(feetPos);
     this.playerModel.up.copy(this.localUp);
     this.playerModel.lookAt(feetPos.clone().add(this.lookForward));
+
+    // Landing squash-and-stretch
+    if (this.landingSquash > 0.01) {
+      const squashY = 1 - this.landingSquash * 0.35;
+      const stretchXZ = 1 + this.landingSquash * 0.2;
+      this.playerModel.scale.set(stretchXZ, squashY, stretchXZ);
+    } else {
+      this.playerModel.scale.set(1, 1, 1);
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Third-person camera
+  // Third-person camera (collision-aware)
   // ---------------------------------------------------------------------------
 
   private updateCamera(deltaTime: number): void {
@@ -439,34 +574,141 @@ export class Player {
     const playerCenter = this.position.clone()
       .sub(this.localUp.clone().multiplyScalar(this.config.height * 0.4));
 
-    // Camera arm: behind the player, angled by pitch
-    const behind = this.lookForward.clone().negate().multiplyScalar(this.camArmLength);
-    const up = this.localUp.clone().multiplyScalar(this.camArmHeight);
-    const right = this.localRight.clone().multiplyScalar(this.camRightOffset);
+    // --- Probe available space to adaptively shorten the camera arm in caves ---
+    const targetArm = this.probeArmLength(playerCenter);
+    const targetHeight = Math.min(this.camArmHeight, targetArm * 0.6);
 
-    // Pitch tilts the arm vertically
+    // Smooth arm changes: pull in fast (tight spaces), push out slower (open areas)
+    const armSmooth = targetArm < this.currentArmLength
+      ? 1 - Math.exp(-18 * deltaTime)   // fast retract
+      : 1 - Math.exp(-4 * deltaTime);   // gentle extend
+    this.currentArmLength += (targetArm - this.currentArmLength) * armSmooth;
+    this.currentArmHeight += (targetHeight - this.currentArmHeight) * armSmooth;
+
+    // --- Compute ideal camera position (behind + above + right) ---
+    const behind = this.lookForward.clone().negate().multiplyScalar(this.currentArmLength);
+    const up = this.localUp.clone().multiplyScalar(this.currentArmHeight);
+    const rightOffset = Math.min(this.camRightOffset, this.currentArmLength * 0.25);
+    const right = this.localRight.clone().multiplyScalar(rightOffset);
     const pitchUp = this.localUp.clone()
-      .multiplyScalar(Math.sin(-this.pitch * 0.5) * this.camArmLength * 0.5);
+      .multiplyScalar(Math.sin(-this.pitch * 0.5) * this.currentArmLength * 0.5);
 
-    const targetCamPos = playerCenter.clone().add(behind).add(up).add(right).add(pitchUp);
+    const idealPos = playerCenter.clone().add(behind).add(up).add(right).add(pitchUp);
 
     // Prevent camera from going below the planet surface
     const minRadius = this.position.length() + 0.02;
-    if (targetCamPos.length() < minRadius) {
-      targetCamPos.normalize().multiplyScalar(minRadius);
+    if (idealPos.length() < minRadius) {
+      idealPos.normalize().multiplyScalar(minRadius);
     }
 
-    // Smooth follow (frame-rate independent)
-    const smooth = 1 - Math.exp(-12 * deltaTime);
+    // --- Final collision check: march from player to ideal and stop before hitting voxels ---
+    const clearDist = this.findClearDistance(playerCenter, idealPos);
+    const totalDist = playerCenter.distanceTo(idealPos);
+
+    let targetCamPos: THREE.Vector3;
+
+    if (clearDist >= totalDist * 0.95) {
+      // Path is clear
+      targetCamPos = idealPos;
+    } else {
+      // Blocked: place camera at clear distance (with small safety margin)
+      const dir = idealPos.clone().sub(playerCenter).normalize();
+      const safeDist = Math.max(0.04, clearDist - 0.02);
+      targetCamPos = playerCenter.clone().add(dir.multiplyScalar(safeDist));
+    }
+
+    // --- Smooth follow (frame-rate independent) ---
+    // Faster follow when close (cave) for tighter feel, slower when far out
+    const camDist = this.camera.position.distanceTo(playerCenter);
+    const followSpeed = camDist < this.camArmLength * 0.5 ? 20 : 12;
+    const smooth = 1 - Math.exp(-followSpeed * deltaTime);
     this.camera.position.lerp(targetCamPos, smooth);
 
-    // Look-at: a point ahead of the player in the look direction
-    const lookDir = this.getLookDirection();
-    const lookAtPoint = playerCenter.clone()
-      .add(lookDir.clone().multiplyScalar(0.12));
+    // Safety: if camera ended up inside a voxel, snap to player
+    if (this.checkCollisionFn && this.checkCollisionFn(this.camera.position)) {
+      this.camera.position.copy(
+        playerCenter.clone().add(this.localUp.clone().multiplyScalar(0.04))
+      );
+    }
 
-    this.camera.up.copy(this.localUp);
+    // --- Look-at: blend between forward-look and player-centered based on distance ---
+    const lookDir = this.getLookDirection();
+    const normalLookAt = playerCenter.clone().add(lookDir.clone().multiplyScalar(0.12));
+    const closeLookAt = playerCenter.clone();
+
+    const currentCamDist = this.camera.position.distanceTo(playerCenter);
+    const closeBlend = Math.max(0, 1 - currentCamDist / (this.camArmLength * 0.4));
+    const lookAtPoint = normalLookAt.clone().lerp(closeLookAt, closeBlend);
+
+    // Camera up vector: when looking nearly straight down, switch up hint to
+    // lookForward so the view doesn't gimbal-lock.
+    const viewDir = lookAtPoint.clone().sub(this.camera.position).normalize();
+    const upDotView = Math.abs(viewDir.dot(this.localUp));
+    const upBlend = Math.max(0, (upDotView - 0.7) / 0.3);
+    const cameraUp = this.localUp.clone()
+      .lerp(this.lookForward, upBlend)
+      .normalize();
+
+    this.camera.up.copy(cameraUp);
     this.camera.lookAt(lookAtPoint);
+  }
+
+  /**
+   * Probe multiple directions around the player to find how much arm-length
+   * the environment allows. In open areas returns full camArmLength; in caves
+   * returns a shorter distance so the camera stays inside the cavity.
+   */
+  private probeArmLength(playerCenter: THREE.Vector3): number {
+    if (!this.checkCollisionFn) return this.camArmLength;
+
+    const maxArm = this.camArmLength;
+    const step = 0.02;
+    let minClear = maxArm;
+
+    // Probe in several directions: behind, above, behind-above, left, right
+    const directions = [
+      this.lookForward.clone().negate(),                                      // behind
+      this.localUp.clone(),                                                    // above
+      this.lookForward.clone().negate().add(this.localUp).normalize(),        // behind-above
+      this.localRight.clone(),                                                 // right
+      this.localRight.clone().negate(),                                        // left
+    ];
+
+    for (const dir of directions) {
+      for (let d = step; d <= maxArm; d += step) {
+        const testPos = playerCenter.clone().add(dir.clone().multiplyScalar(d));
+        if (this.checkCollisionFn(testPos)) {
+          minClear = Math.min(minClear, Math.max(0.05, d - step));
+          break;
+        }
+      }
+    }
+
+    return minClear;
+  }
+
+  /**
+   * March from `from` toward `to` in small steps, checking for voxel collisions.
+   * Returns the distance along the path where the first collision occurs,
+   * or the full distance if the path is entirely clear.
+   */
+  private findClearDistance(from: THREE.Vector3, to: THREE.Vector3): number {
+    const dir = to.clone().sub(from);
+    const totalDist = dir.length();
+    if (totalDist < 0.001) return totalDist;
+    if (!this.checkCollisionFn) return totalDist;
+
+    dir.normalize();
+    const step = 0.02;
+
+    for (let d = step; d < totalDist; d += step) {
+      const testPos = from.clone().add(dir.clone().multiplyScalar(d));
+      if (this.checkCollisionFn(testPos)) {
+        return Math.max(0.04, d - step);
+      }
+    }
+
+    return totalDist;
   }
 
   // ---------------------------------------------------------------------------
